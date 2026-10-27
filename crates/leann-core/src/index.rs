@@ -670,10 +670,11 @@ impl LeannIndex {
             return Ok(Vec::new());
         }
         let n_existing = self.texts.len();
-        let metas = metadatas.unwrap_or_else(|| vec![Value::Null; texts.len()]);
+        let mut metas = metadatas.unwrap_or_else(|| vec![Value::Null; texts.len()]);
         if metas.len() != texts.len() {
             return Err(LeannError::Invalid("metadatas length mismatch".into()));
         }
+        normalize_placement_metas(&mut metas);
         if n_existing == 0 {
             // first data into an empty index: do a full build
             let provider = self.source.provider().clone();
@@ -891,7 +892,6 @@ impl LeannIndex {
         };
         ChunkPlacement::from_records(n, doc_key_of, ordinal_of)
     }
-
     fn rebuild_placement(&mut self) {
         let n = self.texts.len();
         let metas = std::mem::take(&mut self.metadatas);
@@ -907,6 +907,39 @@ fn fxhash64(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
     h
+}
+
+/// Fill in `doc_id` / `chunk_index` when callers supply raw metadata (or
+/// `null`) without placement fields, so context expansion works for every
+/// add path. One `add` call becomes one synthetic document; explicit values
+/// from the ingest pipeline are always preserved.
+fn normalize_placement_metas(metas: &mut [Value]) {
+    let missing = |m: &Value| {
+        m.get("doc_id").and_then(|v| v.as_str()).is_none()
+            || m.get("chunk_index").and_then(|v| v.as_u64()).is_none()
+    };
+    if !metas.iter().any(missing) {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let doc_id = format!("add-{nanos:x}-{}", metas.len());
+    for (i, m) in metas.iter_mut().enumerate() {
+        if !m.is_object() {
+            if m.is_null() {
+                *m = serde_json::json!({});
+            } else {
+                continue; // scalar metadata: leave untouched
+            }
+        }
+        let obj = m.as_object_mut().expect("checked above");
+        obj.entry("doc_id")
+            .or_insert_with(|| Value::String(doc_id.clone()));
+        obj.entry("chunk_index")
+            .or_insert_with(|| Value::from(i as u64));
+    }
 }
 
 fn similarity(metric: Metric, distance: f32) -> f32 {
@@ -1195,6 +1228,45 @@ mod tests {
         assert_eq!(exp.len(), 1);
         // chunk 7 is in doc-1 (chunks 5..9)
         assert_eq!(exp[0].neighbors.len(), 4);
+    }
+
+    #[test]
+    fn raw_add_gets_synthetic_placement() {
+        // Regression: add() with caller-supplied metadata lacking
+        // doc_id/chunk_index must still support context expansion.
+        let texts = corpus(60);
+        let mut idx = LeannIndex::build(&texts, None, provider(), test_cfg()).unwrap();
+
+        // incremental add with custom (placement-less) metadata
+        let extra: Vec<String> = (0..5).map(|i| format!("synthetic chunk {i} about zebras")).collect();
+        let metas: Vec<Value> = (0..5)
+            .map(|i| json!({ "topic": format!("t{i}") }))
+            .collect();
+        let ids = idx.add(&extra, Some(metas)).unwrap();
+        assert_eq!(ids.len(), 5);
+
+        // the middle synthetic chunk must expand to its siblings
+        let mid = ids[2];
+        let exp = idx.expand(
+            &[mid],
+            ContextExpansionOptions {
+                before: 1,
+                after: 1,
+            },
+        );
+        assert_eq!(exp.len(), 1);
+        assert_eq!(exp[0].neighbors.len(), 2, "expected +/-1 neighbors");
+        let (n_before, off_before) = exp[0].neighbors[0];
+        let (n_after, off_after) = exp[0].neighbors[1];
+        assert_eq!(off_before, -1);
+        assert_eq!(off_after, 1);
+        assert_eq!(n_before, ids[1]);
+        assert_eq!(n_after, ids[3]);
+        // metadata got the synthetic fields added (original fields kept)
+        let m = idx.metadata(mid);
+        assert_eq!(m["topic"], json!("t2"));
+        assert!(m["doc_id"].as_str().unwrap().starts_with("add-"));
+        assert_eq!(m["chunk_index"], json!(2));
     }
 
     #[test]

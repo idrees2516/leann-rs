@@ -78,7 +78,7 @@ pub use judge::{Judge, MockJudge, OpenAiJudge};
 pub use local::{local_groundedness, number_consistency, LocalGrounding};
 pub use parse::{parse_guardian_response, ParsedVerdict};
 pub use pipeline::{GuardDecision, GuardPolicy, GuardReport, GuardedChat, RagGuard, RepairConfig};
-pub use sentence::{grounded_rewrite, sentence_attribution, SentenceAttribution};
+pub use sentence::{grounded_rewrite, sentence_attribution, split_sentences, SentenceAttribution};
 
 /// Common error type.
 #[derive(thiserror::Error, Debug)]

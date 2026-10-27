@@ -274,3 +274,36 @@ export interface GuardianOptions {
 
 export declare function version(): string
 export declare function selfTest(): Promise<boolean>
+
+// ---------------------------------------------------------------------------
+// offline (deterministic) grounding — no judge server required
+// ---------------------------------------------------------------------------
+
+export interface LocalGroundingJs {
+  /** fraction of answer numbers found in context (0-1) */
+  numberCoverage: number
+  /** fraction of answer content terms covered by context (0-1) */
+  termCoverage: number
+  /** overall pass at default thresholds */
+  grounded: boolean
+  missingNumbers: Array<string>
+  missingTerms: Array<string>
+}
+
+export interface LocalSentenceJs {
+  index: number
+  text: string
+  grounded: boolean
+  termCoverage: number
+  numberCoverage: number
+  missingTerms: Array<string>
+}
+
+/** Offline grounding check of an answer against context strings (no LLM). */
+export declare function localGrounding(answer: string, contexts: Array<string>): LocalGroundingJs
+
+/** Offline per-sentence grounding audit of an answer (no LLM). */
+export declare function localVerify(answer: string, contexts: Array<string>): Array<LocalSentenceJs>
+
+/** Offline grounded rewrite: answer with ungrounded sentences removed (no LLM). */
+export declare function localRewrite(answer: string, contexts: Array<string>): string

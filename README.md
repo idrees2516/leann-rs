@@ -127,7 +127,7 @@ cd npm && npm install && npm run build   # napi build --platform --release
 ```
 
 ```ts
-import { Leann, Guardian } from "leann-node";
+import { Leann, Guardian, localGrounding, localVerify, localRewrite } from "leann-node";
 
 const leann = new Leann({
   embedder: { kind: "local-hash", dim: 384 },
@@ -159,6 +159,25 @@ const verdict = await guardian.checkGroundedness(
   ["LEANN ... arXiv:2506.08276 (2025)"],
 );
 // verdict.triggered === true (ungrounded)
+
+// Zero-dependency offline layer (deterministic, no judge server):
+const audit = localGrounding(
+  "The budget is 9.7 million dollars.",
+  ["LEANN keeps quantized codes in RAM."],
+);
+// audit.grounded === false, audit.missingNumbers === ["9.7", "million"]
+
+const sentences = localVerify(                       // per-sentence verdicts
+  "Raw vectors stay on disk. The budget is 9.7 million dollars.",
+  ["LEANN keeps quantized codes in RAM; raw vectors stay on disk."],
+);
+// [ { grounded: true, ... }, { grounded: false, missingTerms: ["budget", "9.7", ...] } ]
+
+const clean = localRewrite(                          // ungrounded sentences removed
+  "Raw vectors stay on disk. The budget is 9.7 million dollars.",
+  ["LEANN keeps quantized codes in RAM; raw vectors stay on disk."],
+);
+// "Raw vectors stay on disk."
 ```
 
 ## The LEANN core (paper → code)

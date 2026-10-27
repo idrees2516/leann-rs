@@ -1285,3 +1285,91 @@ pub async fn self_test() -> Result<bool> {
         .await?;
     Ok(!res.hits.is_empty())
 }
+
+// ---------------------------------------------------------------------------
+// offline (deterministic) grounding checks — no judge server required
+// ---------------------------------------------------------------------------
+
+/// Result of the offline (deterministic) grounding check from `leann-guard`.
+#[napi(object)]
+pub struct LocalGroundingJs {
+    /// Fraction of answer numbers found in the context (0-1).
+    pub number_coverage: f64,
+    /// Fraction of answer content terms covered by the context (0-1).
+    pub term_coverage: f64,
+    /// Overall pass at the crate's default thresholds.
+    pub grounded: bool,
+    /// Numbers present in the answer but missing from context.
+    pub missing_numbers: Vec<String>,
+    /// Salient terms present in the answer but missing from context.
+    pub missing_terms: Vec<String>,
+}
+
+/// One sentence's offline grounding verdict.
+#[napi(object)]
+pub struct LocalSentenceJs {
+    pub index: u32,
+    pub text: String,
+    pub grounded: bool,
+    pub term_coverage: f64,
+    pub number_coverage: f64,
+    pub missing_terms: Vec<String>,
+}
+
+impl From<leann_guard::LocalGrounding> for LocalGroundingJs {
+    fn from(g: leann_guard::LocalGrounding) -> Self {
+        LocalGroundingJs {
+            number_coverage: g.number_coverage as f64,
+            term_coverage: g.term_coverage as f64,
+            grounded: g.grounded,
+            missing_numbers: g.missing_numbers,
+            missing_terms: g.missing_terms,
+        }
+    }
+}
+
+/// Offline (no LLM, no server) grounding check of `answer` against `contexts`.
+///
+/// Deterministic term/number-coverage analysis from the IBM Granite Guardian
+/// crate's local pre-filter layer. Fast enough to run on every generation;
+/// use it to gate or flag answers before (or instead of) a judge call.
+#[napi]
+pub fn local_grounding(answer: String, contexts: Vec<String>) -> LocalGroundingJs {
+    let ctx = contexts.join("\n");
+    leann_guard::local_groundedness(&answer, &ctx).into()
+}
+
+/// Offline sentence-level audit: splits `answer` into sentences and checks
+/// each against `contexts` with deterministic grounding. Returns per-sentence
+/// verdicts; sentences with `grounded == false` should be flagged or removed.
+#[napi]
+pub fn local_verify(answer: String, contexts: Vec<String>) -> Vec<LocalSentenceJs> {
+    let ctx = contexts.join("\n");
+    leann_guard::split_sentences(&answer)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let g = leann_guard::local_groundedness(&text, &ctx);
+            LocalSentenceJs {
+                index: index as u32,
+                grounded: g.grounded,
+                term_coverage: g.term_coverage as f64,
+                number_coverage: g.number_coverage as f64,
+                missing_terms: g.missing_terms,
+                text,
+            }
+        })
+        .collect()
+}
+
+/// Offline grounded rewrite: the answer with ungrounded sentences removed.
+/// The cheapest hallucination-elimination pass (deterministic, zero-cost).
+#[napi]
+pub fn local_rewrite(answer: String, contexts: Vec<String>) -> String {
+    let ctx = contexts.join("\n");
+    leann_guard::split_sentences(&answer)
+        .into_iter()
+        .filter(|s| leann_guard::local_groundedness(s, &ctx).grounded)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
