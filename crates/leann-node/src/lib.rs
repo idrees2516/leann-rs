@@ -23,7 +23,7 @@ use leann_chat::rag::{RagAnswer, RagConfig, SourceRef};
 use leann_chat::{create_llm, LlmConfig, LlmKind};
 use leann_guard::{Guardian as CoreGuardian, OpenAiJudge};
 use leann_core::context::ContextExpansionOptions;
-use leann_core::filter::Filter;
+use leann_core::filter::{parse_filter_checked, Filter};
 use leann_core::graph::GraphBuildConfig;
 use leann_core::index::{
     HybridOptions, IndexConfig, LeannIndex, SearchOptions,
@@ -276,6 +276,12 @@ pub struct GuardianVerdictJs {
     pub confidence: f64,
     pub trace: Option<String>,
     pub explanation: Option<String>,
+}
+
+#[napi(object)]
+pub struct AddDedupResultJs {
+    pub chunk_ids: Vec<u32>,
+    pub duplicates_skipped: u32,
 }
 
 #[napi(object)]
@@ -565,8 +571,22 @@ impl Leann {
     /// Open a saved index file (single-file portable `.leann`).
     #[napi]
     pub fn open(path: String, opts: LeannOptions) -> Result<Self> {
+        Self::open_inner(path, opts, None)
+    }
+
+    /// Open an encrypted index file (ChaCha20-Poly1305 + Argon2id).
+    #[napi]
+    pub fn open_encrypted(path: String, passphrase: String, opts: LeannOptions) -> Result<Self> {
+        Self::open_inner(path, opts, Some(passphrase))
+    }
+
+    fn open_inner(path: String, opts: LeannOptions, passphrase: Option<String>) -> Result<Self> {
         let provider = Self::embedder(&opts.embedder)?;
-        let index = LeannIndex::open(&PathBuf::from(path), provider).map_err(to_napi_err)?;
+        let index = match passphrase {
+            Some(p) => LeannIndex::open_with_passphrase(&PathBuf::from(path), &p, provider)
+                .map_err(to_napi_err)?,
+            None => LeannIndex::open(&PathBuf::from(path), provider).map_err(to_napi_err)?,
+        };
         let llm = Self::build_llm(&opts.llm)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(index)),
@@ -891,6 +911,85 @@ impl Leann {
             .collect())
     }
 
+    /// Garbage-collect deleted chunks (reclaims space; ids are renumbered —
+    /// the returned old->new map uses 0xFFFFFFFF for deleted chunks).
+    #[napi]
+    pub fn compact(&self) -> Result<Vec<u32>> {
+        let mut idx = self.inner.write().unwrap();
+        idx.compact().map_err(to_napi_err)
+    }
+
+    /// Batch vector search: all queries embedded in one provider call, then
+    /// searched in parallel across CPU cores. Results in input order.
+    #[napi]
+    pub async fn search_batch(
+        &self,
+        queries: Vec<String>,
+        args: Option<SearchArgs>,
+    ) -> Result<Vec<SearchResultJs>> {
+        let opts = self.search_opts(&args)?;
+        let inner = self.inner.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            let idx = inner.read().unwrap();
+            let refs: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+            idx.search_batch(&refs, &opts)
+        })
+        .await
+        .map_err(to_napi_err)?
+        .map_err(to_napi_err)?;
+        Ok(results
+            .iter()
+            .map(|res| SearchResultJs {
+                hits: res
+                    .hits
+                    .iter()
+                    .map(|h| Hit {
+                        id: h.id,
+                        distance: h.distance as f64,
+                        similarity: h.similarity as f64,
+                        text: h.text.clone(),
+                        metadata: h.metadata.clone(),
+                    })
+                    .collect(),
+                stats: SearchStatsJs {
+                    hops: res.stats.hops as u32,
+                    pq_scored: res.stats.pq_scored as u32,
+                    promoted: res.stats.promoted as u32,
+                    embed_calls: res.stats.embed_calls as u32,
+                    vectors_embedded: res.stats.vectors_embedded as u32,
+                    embed_secs: res.stats.embed_secs,
+                    took_ms: res.took_ms,
+                },
+            })
+            .collect())
+    }
+
+    /// Add texts with duplicate suppression ("exact" or "near" SimHash mode).
+    #[napi]
+    pub async fn add_texts_dedup(
+        &self,
+        texts: Vec<String>,
+        metadatas: Option<Vec<Value>>,
+        mode: Option<String>,
+    ) -> Result<AddDedupResultJs> {
+        let mode = match mode.as_deref() {
+            Some("near") => leann_core::DedupMode::Near,
+            _ => leann_core::DedupMode::Exact,
+        };
+        let inner = self.inner.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let mut idx = inner.write().unwrap();
+            idx.add_with_dedup(&texts, metadatas, mode)
+        })
+        .await
+        .map_err(to_napi_err)?
+        .map_err(to_napi_err)?;
+        Ok(AddDedupResultJs {
+            chunk_ids: res.0,
+            duplicates_skipped: res.1 as u32,
+        })
+    }
+
     /// Delete chunks by id.
     #[napi]
     pub fn delete_chunks(&self, ids: Vec<u32>) -> u32 {
@@ -922,6 +1021,16 @@ impl Leann {
     pub fn save(&self, path: String) -> Result<()> {
         let idx = self.inner.read().unwrap();
         idx.save(&PathBuf::from(path)).map_err(to_napi_err)
+    }
+
+    /// Save encrypted at rest: the whole index is sealed with
+    /// ChaCha20-Poly1305 under an Argon2id-derived key. Opens with
+    /// `Leann.openEncrypted(path, passphrase, opts)`.
+    #[napi]
+    pub fn save_encrypted(&self, path: String, passphrase: String) -> Result<()> {
+        let idx = self.inner.read().unwrap();
+        idx.save_encrypted(&PathBuf::from(path), &passphrase)
+            .map_err(to_napi_err)
     }
 
     /// Index statistics.
@@ -993,39 +1102,54 @@ impl Leann {
     }
 
     fn search_opts(&self, args: &Option<SearchArgs>) -> Result<SearchOptions> {
-        let mut o = SearchOptions::default();
-        if let Some(a) = args {
-            if let Some(k) = a.k {
-                o.k = k as usize;
-            }
-            if let Some(ef) = a.ef {
-                o.ef = Some(ef as usize);
-            }
-            if let Some(al) = a.alpha {
-                o.alpha = Some(al as f32);
-            }
-            if let Some(mb) = a.min_batch {
-                o.min_batch = Some(mb as usize);
-            }
-            if let Some(mb) = a.max_batch {
-                o.max_batch = Some(mb as usize);
-            }
-            if let Some(r) = a.relax {
-                o.relax = Some(r as f32);
-            }
-            if let Some(e) = a.exact {
-                o.exact = e;
-            }
-            if let Some(wt) = a.with_text {
-                o.with_text = wt;
-            }
-            if let Some(wm) = a.with_metadata {
-                o.with_metadata = wm;
-            }
-            o.filter = parse_filter(a.filter.clone())?;
-        }
-        Ok(o)
+        leann_search_opts(args)
     }
+}
+
+/// Shared SearchArgs -> SearchOptions conversion (checked filter parse).
+fn leann_search_opts(args: &Option<SearchArgs>) -> Result<SearchOptions> {
+    let mut o = SearchOptions::default();
+    if let Some(a) = args {
+        if let Some(k) = a.k {
+            o.k = k as usize;
+        }
+        if let Some(ef) = a.ef {
+            o.ef = Some(ef as usize);
+        }
+        if let Some(al) = a.alpha {
+            o.alpha = Some(al as f32);
+        }
+        if let Some(mb) = a.min_batch {
+            o.min_batch = Some(mb as usize);
+        }
+        if let Some(mb) = a.max_batch {
+            o.max_batch = Some(mb as usize);
+        }
+        if let Some(r) = a.relax {
+            o.relax = Some(r as f32);
+        }
+        if let Some(e) = a.exact {
+            o.exact = e;
+        }
+        if let Some(wt) = a.with_text {
+            o.with_text = wt;
+        }
+        if let Some(wm) = a.with_metadata {
+            o.with_metadata = wm;
+        }
+        o.filter = match &a.filter {
+        Some(v) if !v.is_null() => {
+            leann_core::validate::check_filter_limits(v)
+                .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+            Some(
+                Filter::from_value(v)
+                    .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    }
+    Ok(o)
 }
 
 /// Standalone IBM Granite Guardian judge (leann-guard): works with any
@@ -1178,8 +1302,9 @@ impl Collections {
     }
 
     fn path_for(&self, user: &str, name: &str) -> PathBuf {
-        let safe = |s: &str| s.replace(['/', '\\', ':'], "_");
-        self.root.join(safe(user)).join(format!("{}.leann", safe(name)))
+        self.root
+            .join(leann_core::safe_component(user))
+            .join(format!("{}.leann", leann_core::safe_component(name)))
     }
 
     /// Open (or create) a user's collection.
@@ -1196,7 +1321,7 @@ impl Collections {
     /// List collection names for a user.
     #[napi]
     pub fn list(&self, user: String) -> Vec<String> {
-        let dir = self.root.join(user.replace(['/', '\\', ':'], "_"));
+        let dir = self.root.join(leann_core::safe_component(&user));
         let mut out = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -1230,6 +1355,18 @@ impl Collections {
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The SIMD kernel level in use on this CPU: "avx512", "avx2", "sse", or
+/// "none" (portable auto-vectorized). Diagnostics for perf tuning.
+#[napi]
+pub fn simd_level() -> String {
+    match leann_core::simd::level() {
+        leann_core::simd::SimdLevel::Avx512 => "avx512".into(),
+        leann_core::simd::SimdLevel::Avx2 => "avx2".into(),
+        leann_core::simd::SimdLevel::Sse => "sse".into(),
+        leann_core::simd::SimdLevel::None => "none".into(),
+    }
 }
 
 /// Quick self-test: build a tiny local index and search it. Returns true on

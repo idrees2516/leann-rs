@@ -96,7 +96,8 @@ pub fn create_embedder(cfg: &EmbedderConfig) -> Result<Arc<dyn EmbeddingProvider
                 cfg.batch_size,
                 cfg.concurrency,
                 cfg.max_retries,
-            );
+            )
+            .map_err(LeannError::Invalid)?;
             if cfg.send_dimensions_param {
                 e = e.with_dimensions_param(true);
             }

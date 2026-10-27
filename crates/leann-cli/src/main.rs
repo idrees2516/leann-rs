@@ -15,12 +15,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use leann_chat::{create_llm, LlmConfig, LlmKind};
-use leann_core::filter::parse_filter;
+use leann_core::filter::parse_filter_checked;
 use leann_core::index::{HybridOptions, LeannIndex, SearchOptions};
 use leann_core::metric::Metric;
 use leann_embedder::{create_embedder, EmbedderConfig, EmbedderKind};
 use leann_guard::{GuardPolicy, Guardian, OpenAiJudge, RagGuard};
 use leann_ingest::{ingest_files, IngestOptions};
+mod mcp;
 
 #[derive(Parser)]
 #[command(name = "leann", version, about = "LEANN: storage-efficient vector search + agentic RAG (Rust)")]
@@ -97,6 +98,12 @@ enum Cmd {
     },
     /// Print index statistics
     Stats,
+    /// Run as an MCP (Model Context Protocol) stdio tool server
+    Mcp {
+        /// Passphrase for encrypted indexes (also LEANN_PASSPHRASE env)
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
     /// Delete chunks matching a JSON filter
     Delete { filter: String },
 }
@@ -152,6 +159,10 @@ fn main() {
         }
         Cmd::Stats => cmd_stats(&cli.index, provider),
         Cmd::Delete { filter } => cmd_delete(&cli.index, provider, filter),
+        Cmd::Mcp { passphrase } => {
+            let _ = passphrase; // encrypted MCP indexes: LEANN_PASSPHRASE env
+            std::process::exit(mcp::run(cli.index));
+        }
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -253,7 +264,7 @@ fn cmd_search(
     let idx = open_or_hint(index_path, provider)?;
     let f = filter
         .as_deref()
-        .map(parse_filter)
+        .map(parse_filter_checked)
         .transpose()
         .map_err(|e| format!("bad filter: {e}"))?;
 
@@ -465,7 +476,7 @@ fn cmd_delete(
     filter: String,
 ) -> Result<(), String> {
     let mut idx = open_or_hint(index_path, provider)?;
-    let f = parse_filter(&filter).map_err(|e| format!("bad filter: {e}"))?;
+    let f = parse_filter_checked(&filter).map_err(|e| format!("bad filter: {e}"))?;
     let n = idx.delete_where(&f);
     idx.save(index_path).map_err(|e| e.to_string())?;
     println!("deleted {} chunks", n);

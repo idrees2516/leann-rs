@@ -19,7 +19,9 @@ use crate::graph::{DistOracle, GraphBuildConfig, HnswGraph, HubPruneConfig, Slic
 use crate::hybrid::{fusion, FusionMode, HybridWeights};
 use crate::metric::Metric;
 use crate::pq::{kmeans_centroids, PqCodec, PqConfig};
-use crate::search::{brute_force_search, two_level_search, SearchParams, SearchStats};
+use crate::search::{brute_force_search, two_level_search_tls, SearchParams, SearchStats};
+use crate::dedup::{DedupMode, Deduper};
+use crate::format::{read_index_with_passphrase, write_index_encrypted};
 use crate::{LeannError, Result};
 
 /// Default search tunables (see `SearchParams` for meaning).
@@ -454,6 +456,10 @@ impl LeannIndex {
                 got_dim: provider.dim(),
             });
         }
+        Self::from_loaded(loaded, provider)
+    }
+
+    fn from_loaded(loaded: crate::format::LoadedIndex, provider: Arc<dyn EmbeddingProvider>) -> Result<Self> {
         let n = loaded.texts.len();
         let refs: Vec<&str> = (0..n as u32).map(|i| loaded.texts.text(i)).collect();
         let bm25 = Bm25Index::build(&refs, Bm25Params::default());
@@ -475,6 +481,22 @@ impl LeannIndex {
         })
     }
 
+    /// Open an index that may be encrypted at rest (see [`Self::save_encrypted`]).
+    pub fn open_with_passphrase(
+        path: &Path,
+        passphrase: &str,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> Result<Self> {
+        let loaded = read_index_with_passphrase(path, Some(passphrase))?;
+        if provider.dim() != loaded.codec.dim {
+            return Err(LeannError::DimMismatch {
+                index_dim: loaded.codec.dim,
+                got_dim: provider.dim(),
+            });
+        }
+        Self::from_loaded(loaded, provider)
+    }
+
     /// Persist (atomic tmp + rename).
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
@@ -492,6 +514,30 @@ impl LeannIndex {
                 tombstones: &self.tombstones,
                 embedder_name: &self.embedder_name,
             },
+        )
+    }
+
+    /// Persist encrypted at rest: ChaCha20-Poly1305 AEAD over the whole
+    /// serialized payload, key derived from `passphrase` with Argon2id.
+    /// A stolen file reveals nothing (texts, codes, graph, metadata are all
+    /// inside the seal) and any tampering fails authentication on open.
+    pub fn save_encrypted(&self, path: &Path, passphrase: &str) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        write_index_encrypted(
+            path,
+            IndexFile {
+                config: &self.cfg,
+                texts: &self.texts,
+                metadatas: &self.metadatas,
+                codec: &self.codec,
+                codes: &self.codes,
+                graph: &self.graph,
+                tombstones: &self.tombstones,
+                embedder_name: &self.embedder_name,
+            },
+            passphrase,
         )
     }
 
@@ -528,7 +574,7 @@ impl LeannIndex {
             let alive = |id: u32| self.is_alive(id);
             brute_force_search(self.graph.n, &alive, &self.source, &self.texts, q, fetch_k)?
         } else {
-            two_level_search(&self.graph, &self.codec, &self.codes, &self.source, &self.texts, q, &params)?
+            two_level_search_tls(&self.graph, &self.codec, &self.codes, &self.source, &self.texts, q, &params)?
         };
 
         let mut report: SearchReport = stats.into();
@@ -568,6 +614,25 @@ impl LeannIndex {
             took_ms,
             stats: report,
         })
+    }
+
+    /// Batch vector search: embeds all queries in **one** provider call, then
+    /// searches in parallel across rayon workers (per-thread scratch + embed
+    /// cache shards make the steady state allocation-free). Results are
+    /// returned in input order.
+    pub fn search_batch(&self, queries: &[&str], opts: &SearchOptions) -> Result<Vec<SearchResult>> {
+        let qs = self.source.embed_texts(queries)?;
+        self.search_by_vector_batch(&qs, opts)
+    }
+
+    /// Batch search with pre-computed query vectors (parallel).
+    pub fn search_by_vector_batch(
+        &self,
+        qs: &[Vec<f32>],
+        opts: &SearchOptions,
+    ) -> Result<Vec<SearchResult>> {
+        use rayon::prelude::*;
+        qs.par_iter().map(|q| self.search_by_vector(q, opts)).collect()
     }
 
     /// Hybrid search: LEANN vectors + BM25 + fusion (+ optional context
@@ -726,7 +791,7 @@ impl LeannIndex {
             ..SearchParams::default()
         };
         for e in embs.iter() {
-            let _ = two_level_search(
+            let _ = crate::search::two_level_search_tls(
                 &self.graph,
                 &self.codec,
                 &self.codes,
@@ -877,6 +942,131 @@ impl LeannIndex {
             "metadata": self.metadata(id),
             "alive": self.is_alive(id),
         })
+    }
+
+    /// Garbage-collect deleted chunks: drops tombstoned entries, remaps the
+    /// graph in place (no re-embedding), rebuilds BM25/placement, and clears
+    /// the embed cache (ids shift). Returns the number of chunks removed.
+    ///
+    /// Ids of surviving chunks change: the `old -> new` mapping is returned
+    /// so callers can translate any references they hold.
+    pub fn compact(&mut self) -> Result<Vec<u32>> {
+        let old_n = self.texts.len();
+        let alive: Vec<u32> = (0..old_n as u32).filter(|&i| self.is_alive(i)).collect();
+        if alive.len() == old_n {
+            return Ok((0..old_n as u32).collect()); // nothing to do
+        }
+
+        let new_n = alive.len();
+        // old -> new map; u32::MAX marks deleted
+        let mut old_to_new = vec![u32::MAX; old_n];
+        for (new_id, &old_id) in alive.iter().enumerate() {
+            old_to_new[old_id as usize] = new_id as u32;
+        }
+
+        // remap data sections
+        let mut new_texts: Vec<String> = Vec::with_capacity(new_n);
+        let mut new_metas: Vec<Value> = Vec::with_capacity(new_n);
+        let m_bytes = self.codec.m;
+        let mut new_codes = vec![0u8; new_n * m_bytes];
+        for (new_id, &old_id) in alive.iter().enumerate() {
+            new_texts.push(self.texts.text(old_id).to_string());
+            new_metas.push(self.metadatas[old_id as usize].clone());
+            let src = &self.codes[old_id as usize * m_bytes..(old_id as usize + 1) * m_bytes];
+            new_codes[new_id * m_bytes..(new_id + 1) * m_bytes].copy_from_slice(src);
+        }
+
+        // remap graph: filter dead neighbors and renumber
+        let mut new_graph = crate::graph::HnswGraph::with_capacity(new_n);
+        let mut max_level = 0u8;
+        let mut entry = 0u32;
+        for (new_id, &old_id) in alive.iter().enumerate() {
+            let lvl = self.graph.levels[old_id as usize];
+            new_graph.levels[new_id] = lvl; // with_capacity pre-fills: assign, don't push
+            if lvl > 0 {
+                while new_graph.upper[new_id].len() < lvl as usize {
+                    new_graph.upper[new_id].push(Vec::new());
+                }
+                for (li, lst) in self.graph.upper[old_id as usize].iter().enumerate() {
+                    new_graph.upper[new_id][li] = lst
+                        .iter()
+                        .filter_map(|&n| old_to_new.get(n as usize).copied())
+                        .filter(|&n| n != u32::MAX)
+                        .collect();
+                }
+            }
+            if lvl > max_level {
+                max_level = lvl;
+                entry = new_id as u32;
+            }
+            new_graph.adj0[new_id] = self.graph.adj0[old_id as usize]
+                .iter()
+                .filter_map(|&n| old_to_new.get(n as usize).copied())
+                .filter(|&n| n != u32::MAX)
+                .collect();
+        }
+        new_graph.max_level = max_level;
+        new_graph.entry = entry;
+        new_graph.mark_complete(new_n);
+
+        // rebuild derived state
+        let refs: Vec<&str> = new_texts.iter().map(|s| s.as_str()).collect();
+        let bm25 = Bm25Index::build(&refs, Bm25Params::default());
+        let placement = Self::build_placement(&new_metas, new_n);
+
+        // ids shift: cached embeddings would be wrong — drop them all
+        self.source.cache().clear();
+
+        self.texts = TextStore::Owned(new_texts);
+        self.metadatas = new_metas;
+        self.codes = new_codes;
+        self.graph = new_graph;
+        self.tombstones = Vec::new();
+        self.bm25 = bm25;
+        self.placement = placement;
+        self.file_bytes = None;
+        Ok(old_to_new)
+    }
+
+    /// Add chunks with duplicate suppression. Returns `(added_ids, skipped)`
+    /// where `skipped` counts texts judged duplicates of *existing index
+    /// content or earlier texts in this call* (exact match, or SimHash
+    /// Hamming distance <= 3 in [`DedupMode::Near`]).
+    pub fn add_with_dedup(
+        &mut self,
+        texts: &[String],
+        metadatas: Option<Vec<Value>>,
+        mode: DedupMode,
+    ) -> Result<(Vec<u32>, usize)> {
+        if mode == DedupMode::Off {
+            let ids = self.add(texts, metadatas)?;
+            return Ok((ids, 0));
+        }
+        // hash existing corpus once
+        let mut deduper = Deduper::new(mode);
+        if self.texts.len() > 0 {
+            for i in 0..self.texts.len() as u32 {
+                deduper.register(self.texts.text(i));
+            }
+        }
+        let mut keep_texts = Vec::new();
+        let mut keep_metas = Vec::new();
+        let metas = metadatas.unwrap_or_else(|| vec![Value::Null; texts.len()]);
+        let mut skipped = 0usize;
+        for (t, m) in texts.iter().zip(metas.into_iter()) {
+            if deduper.register(t) {
+                skipped += 1;
+            } else {
+                keep_texts.push(t.clone());
+                keep_metas.push(m);
+            }
+        }
+        let ids = if keep_texts.is_empty() {
+            Vec::new()
+        } else {
+            self.add(&keep_texts, Some(keep_metas))?
+        };
+        Ok((ids, skipped))
     }
 
     fn build_placement(metas: &[Value], n: usize) -> ChunkPlacement {
@@ -1314,5 +1504,118 @@ mod tests {
         let b: Vec<u32> = r2.hits.iter().map(|h| h.id).collect();
         let inter = a.iter().filter(|x| b.contains(x)).count();
         assert!(inter >= 3, "sharded recall too different: {a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn compact_reclaims_tombstones() {
+        let texts = corpus(120);
+        let mut idx = LeannIndex::build(&texts, None, provider(), test_cfg()).unwrap();
+        // delete every 3rd chunk
+        let doomed: Vec<u32> = (0..120).step_by(3).collect();
+        idx.delete(&doomed);
+        assert_eq!(idx.stats().deleted, 40);
+
+        let map = idx.compact().unwrap();
+        assert_eq!(map.len(), 120);
+        let s = idx.stats();
+        assert_eq!(s.chunks, 80, "compacted chunk count");
+        assert_eq!(s.deleted, 0, "tombstones cleared");
+
+        // search still works and returns only alive chunks
+        let res = idx
+            .search("machine learning", &SearchOptions { k: 10, ..Default::default() })
+            .unwrap();
+        assert!(!res.hits.is_empty());
+        for h in &res.hits {
+            assert!(h.id < 80, "ids must be remapped into [0,80)");
+        }
+        // old->new mapping is a permutation onto alive slots
+        let mapped: std::collections::HashSet<u32> = map
+            .iter()
+            .filter(|&&n| n != u32::MAX)
+            .copied()
+            .collect();
+        assert_eq!(mapped.len(), 80);
+
+        // regression: compact + save + load must roundtrip (levels were
+        // double-pushed when with_capacity pre-filled them)
+        let dir = std::env::temp_dir().join("leann-test-compact");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.leann");
+        idx.save(&path).unwrap();
+        let re = LeannIndex::open(&path, provider()).unwrap();
+        assert_eq!(re.stats().chunks, 80);
+        let res2 = re
+            .search("machine learning", &SearchOptions { k: 5, ..Default::default() })
+            .unwrap();
+        assert!(!res2.hits.is_empty());
+    }
+
+    #[test]
+    fn encrypted_roundtrip() {
+        let dir = std::env::temp_dir().join("leann-test-enc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.leann");
+        let texts = corpus(80);
+        let idx = LeannIndex::build(&texts, None, provider(), test_cfg()).unwrap();
+        idx.save_encrypted(&path, "open sesame").unwrap();
+
+        // file must NOT contain the plaintext magic or any raw text
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..8], b"LEANNENC");
+        assert!(!bytes.windows(16).any(|w| w == b"machine learning"));
+
+        // wrong passphrase rejected
+        assert!(LeannIndex::open_with_passphrase(&path, "wrong", provider()).is_err());
+        // no passphrase rejected
+        assert!(LeannIndex::open(&path, provider()).is_err());
+        // correct passphrase works and searches
+        let opened = LeannIndex::open_with_passphrase(&path, "open sesame", provider()).unwrap();
+        let res = opened
+            .search("vector search", &SearchOptions { k: 5, ..Default::default() })
+            .unwrap();
+        assert!(!res.hits.is_empty());
+    }
+
+    #[test]
+    fn batch_search_matches_single() {
+        let texts = corpus(200);
+        let idx = LeannIndex::build(&texts, None, provider(), test_cfg()).unwrap();
+        let queries: Vec<String> = (0..8)
+            .map(|i| format!("query number {i} about {}", ["machine learning", "rust ownership", "vector search"][i % 3]))
+            .collect();
+        let refs: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+        let opts = SearchOptions { k: 5, ..Default::default() };
+
+        let batch = idx.search_batch(&refs, &opts).unwrap();
+        assert_eq!(batch.len(), 8);
+        for (i, r) in batch.iter().enumerate() {
+            let single = idx.search(&queries[i], &opts).unwrap();
+            let bid: Vec<u32> = r.hits.iter().map(|h| h.id).collect();
+            let sid: Vec<u32> = single.hits.iter().map(|h| h.id).collect();
+            // identical when the embed cache is warm for both
+            assert_eq!(bid, sid, "query {i} differs between batch and single");
+        }
+    }
+
+    #[test]
+    fn dedup_add_suppresses_duplicates() {
+        let texts = corpus(60);
+        let mut idx = LeannIndex::build(&texts, None, provider(), test_cfg()).unwrap();
+        let base = "The quarterly report shows revenue growth of 12 percent driven by enterprise sales in the EMEA region";
+        let dupes: Vec<String> = vec![
+            base.to_string(),
+            base.to_string(),                                  // exact
+            "The quarterly report shows revenue growth of 13 percent driven by enterprise sales in the EMEA region".to_string(), // near
+            "A completely novel sentence about zebras crossing the river at dawn while crocodiles sleep".to_string(),          // keep
+        ];
+        let (ids, skipped) = idx.add_with_dedup(&dupes, None, DedupMode::Near).unwrap();
+        assert_eq!(ids.len(), 2, "2 of 4 kept");
+        assert_eq!(skipped, 2);
+        // exact mode keeps the near-dup
+        let more: Vec<String> = vec![base.to_string()];
+        let (ids2, skipped2) = idx.add_with_dedup(&more, None, DedupMode::Exact).unwrap();
+        assert_eq!(ids2.len(), 0);
+        assert_eq!(skipped2, 1);
     }
 }

@@ -177,6 +177,44 @@ impl PqCodec {
         vs.par_iter().map(|v| self.encode(v)).collect()
     }
 
+    /// Encode a batch into one flat, contiguous code buffer (`n * m` bytes)
+    /// with zero per-vector allocations — the build-time hot path.
+    pub fn encode_batch_flat(&self, vs: &[Vec<f32>]) -> Vec<u8> {
+        let mut out = vec![0u8; vs.len() * self.m];
+        out.par_chunks_mut(self.m)
+            .zip(vs.par_iter())
+            .for_each(|(dst, v)| {
+                debug_assert_eq!(v.len(), self.dim);
+                self.encode_into(v, dst);
+            });
+        out
+    }
+
+    /// Encode one vector into a caller-provided `m`-byte buffer (no alloc).
+    pub fn encode_into(&self, v: &[f32], out: &mut [u8]) {
+        debug_assert_eq!(v.len(), self.dim);
+        debug_assert!(out.len() >= self.m);
+        for j in 0..self.m {
+            let sub = &v[j * self.subdim..(j + 1) * self.subdim];
+            let cbslab = &self.codebook[j];
+            let mut best = 0usize;
+            let mut best_d = f32::INFINITY;
+            for c in 0..self.ksub {
+                let centroid = &cbslab[c * self.subdim..(c + 1) * self.subdim];
+                let d = match self.metric {
+                    Metric::L2 => l2_sq(sub, centroid),
+                    Metric::Cosine => 1.0 - dot(sub, centroid),
+                    Metric::InnerProduct => -dot(sub, centroid),
+                };
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            out[j] = best as u8;
+        }
+    }
+
     /// Build the ADC lookup table for a query: `table[j * ksub + c]` is the
     /// distance between the query's `j`-th sub-vector and centroid `c`.
     pub fn adc_table(&self, q: &[f32]) -> Vec<f32> {

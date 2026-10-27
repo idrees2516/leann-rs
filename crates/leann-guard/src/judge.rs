@@ -54,6 +54,24 @@ pub struct OpenAiJudge {
     calls: Arc<AtomicUsize>,
 }
 
+/// Local SSRF hardening (kept inline: this crate is deliberately standalone).
+/// Base URLs must be http(s) with no userinfo. Invalid URLs are clamped to
+/// `http://localhost:0/` (unroutable) instead of panicking, and `is_valid`
+/// callers can check explicitly.
+fn sanitize_base_url(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    let ok = (lower.starts_with("http://") || lower.starts_with("https://"))
+        && !trimmed.contains('@')
+        && trimmed.len() <= 2048
+        && lower.len() > 8; // scheme + at least one host char
+    if ok {
+        trimmed.to_string()
+    } else {
+        String::from("http://localhost:0/") // unroutable sink
+    }
+}
+
 impl OpenAiJudge {
     pub fn new(
         base_url: impl Into<String>,
@@ -64,7 +82,7 @@ impl OpenAiJudge {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(120))
                 .build(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: sanitize_base_url(&base_url.into()),
             api_key: api_key.into(),
             model: model.into(),
             think: false,

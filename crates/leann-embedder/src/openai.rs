@@ -64,7 +64,7 @@ impl OpenAiEmbedder {
         api_key: impl Into<String>,
         model: impl Into<String>,
         dim: usize,
-    ) -> Self {
+    ) -> std::result::Result<Self, String> {
         Self::with_options(base_url, api_key, model, dim, 128, 4, 3)
     }
 
@@ -76,14 +76,19 @@ impl OpenAiEmbedder {
         batch_size: usize,
         concurrency: usize,
         max_retries: u32,
-    ) -> Self {
+    ) -> std::result::Result<Self, String> {
+        let raw: String = base_url.into();
+        let trimmed = raw.trim_end_matches('/');
+        let validated = leann_core::validate_base_url(trimmed)
+            .map_err(|e| format!("invalid base URL {trimmed:?}: {e}"))?
+            .to_string();
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(120))
             .redirects(4)
             .build();
-        Self {
+        Ok(Self {
             agent,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: validated,
             api_key: api_key.into(),
             model: model.into(),
             dim,
@@ -93,7 +98,7 @@ impl OpenAiEmbedder {
             send_dimensions: false,
             requests: AtomicUsize::new(0),
             retried: AtomicUsize::new(0),
-        }
+        })
     }
 
     /// Enable sending `dimensions` (for text-embedding-3-* models).
@@ -233,6 +238,6 @@ pub fn openai_embedder(
     api_key: &str,
     model: &str,
     dim: usize,
-) -> Arc<dyn EmbeddingProvider> {
-    Arc::new(OpenAiEmbedder::new(base_url, api_key, model, dim))
+) -> std::result::Result<Arc<dyn EmbeddingProvider>, String> {
+    Ok(Arc::new(OpenAiEmbedder::new(base_url, api_key, model, dim)?))
 }

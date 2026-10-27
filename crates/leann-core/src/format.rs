@@ -155,6 +155,37 @@ impl<B: Write> W<B> {
 
 /// Write an index atomically (tmp file + rename).
 pub fn write_index(path: &Path, data: IndexFile) -> Result<()> {
+    let bytes = serialize_index(&data)?;
+    atomic_write(path, &bytes)
+}
+
+/// Write an index encrypted at rest (ChaCha20-Poly1305, Argon2id key from
+/// `passphrase`). Container: `MAGIC_ENC | u32 ver | salt[16] | sealed blob`.
+pub fn write_index_encrypted(path: &Path, data: IndexFile, passphrase: &str) -> Result<()> {
+    let plain = serialize_index(&data)?;
+    let (salt, blob) = crate::crypto::seal_passphrase(passphrase, &plain)?;
+    let mut out = Vec::with_capacity(8 + 4 + 16 + blob.len());
+    out.extend_from_slice(crate::crypto::MAGIC_ENC);
+    out.extend_from_slice(&crate::crypto::ENC_VERSION.to_le_bytes());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&blob);
+    atomic_write(path, &out)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let file = File::create(&tmp)?;
+        let mut w = BufWriter::with_capacity(1 << 20, file);
+        w.write_all(bytes)?;
+        w.flush()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Serialize an index to bytes in memory (the plaintext container payload).
+pub fn serialize_index(data: &IndexFile) -> Result<Vec<u8>> {
     let n = data.texts.len();
     if n != data.metadatas.len() || n != data.graph.n {
         return Err(LeannError::Invalid(format!(
@@ -164,109 +195,102 @@ pub fn write_index(path: &Path, data: IndexFile) -> Result<()> {
             data.graph.n
         )));
     }
-    let tmp = path.with_extension("tmp");
-    {
-        let file = File::create(&tmp)?;
-        let mut w = W {
-            out: BufWriter::with_capacity(1 << 20, file),
-        };
+    let mut out: Vec<u8> = Vec::with_capacity(n * 64 + 4096);
+    let mut w = W { out: &mut out };
 
-        // header
-        w.bytes(MAGIC)?;
-        w.u32(FORMAT_VERSION)?;
-        w.u32(data.config.metric as u32)?;
-        w.u32(data.codec.dim as u32)?;
-        w.u32(data.codec.m as u32)?;
-        w.u32(data.codec.ksub as u32)?;
+    // header
+    w.bytes(MAGIC)?;
+    w.u32(FORMAT_VERSION)?;
+    w.u32(data.config.metric as u32)?;
+    w.u32(data.codec.dim as u32)?;
+    w.u32(data.codec.m as u32)?;
+    w.u32(data.codec.ksub as u32)?;
 
-        // meta json
-        let meta = serde_json::json!({
-            "config": data.config,
-            "n": n,
-            "deleted": count_bits(data.tombstones),
-            "embedder": data.embedder_name,
-            "format_version": FORMAT_VERSION,
-        });
-        let meta_bytes = serde_json::to_vec(&meta)?;
-        w.u64(meta_bytes.len() as u64)?;
-        w.bytes(&meta_bytes)?;
+    // meta json
+    let meta = serde_json::json!({
+        "config": data.config,
+        "n": n,
+        "deleted": count_bits(data.tombstones),
+        "embedder": data.embedder_name,
+        "format_version": FORMAT_VERSION,
+    });
+    let meta_bytes = serde_json::to_vec(&meta)?;
+    w.u64(meta_bytes.len() as u64)?;
+    w.bytes(&meta_bytes)?;
 
-        // metadatas (JSON array)
-        let metas = serde_json::to_vec(&data.metadatas)?;
-        w.u64(metas.len() as u64)?;
-        w.bytes(&metas)?;
+    // metadatas (JSON array)
+    let metas = serde_json::to_vec(&data.metadatas)?;
+    w.u64(metas.len() as u64)?;
+    w.bytes(&metas)?;
 
-        // texts
-        w.u64(n as u64)?;
-        let mut offsets: Vec<u64> = Vec::with_capacity(n + 1);
-        let mut blob: Vec<u8> = Vec::new();
-        let mut off = 0u64;
-        offsets.push(0);
-        for i in 0..n as u32 {
-            let t = data.texts.text(i);
-            blob.extend_from_slice(t.as_bytes());
-            off += t.len() as u64;
-            offsets.push(off);
-        }
-        w.u64s(&offsets)?;
-        w.bytes(&blob)?;
-
-        // codebook (flattened)
-        let flat_cb: Vec<f32> = data.codec.codebook.iter().flatten().copied().collect();
-        w.f32s(&flat_cb)?;
-
-        // codes
-        debug_assert_eq!(data.codes.len(), n * data.codec.m);
-        w.bytes(&data.codes)?;
-
-        // graph
-        let g = &data.graph;
-        w.u32(g.n as u32)?;
-        w.u8(g.max_level)?;
-        w.u32(g.entry)?;
-        for &lv in &g.levels {
-            w.u8(lv)?;
-        }
-        // upper-layer lists (only nodes with level >= 1)
-        let mut upper_lists = 0u64;
-        for (node, lists) in g.upper.iter().enumerate() {
-            for (li, lst) in lists.iter().enumerate() {
-                if !lst.is_empty() {
-                    upper_lists += 1;
-                }
-                let _ = (node, li);
-            }
-        }
-        w.u64(upper_lists)?;
-        for (node, lists) in g.upper.iter().enumerate() {
-            for (li, lst) in lists.iter().enumerate() {
-                if !lst.is_empty() {
-                    w.u32(node as u32)?;
-                    w.u8((li + 1) as u8)?;
-                    w.u32(lst.len() as u32)?;
-                    w.u32s(lst)?;
-                }
-            }
-        }
-        // layer-0 CSR
-        let mut indptr: Vec<u32> = Vec::with_capacity(g.n + 1);
-        indptr.push(0);
-        let mut indices: Vec<u32> = Vec::new();
-        for a in &g.adj0 {
-            indices.extend_from_slice(a);
-            indptr.push(indices.len() as u32);
-        }
-        w.u32s(&indptr)?;
-        w.u32s(&indices)?;
-
-        // tombstones
-        w.u64(data.tombstones.len() as u64)?;
-        w.u64s(&data.tombstones)?;
-
-        w.out.flush()?;
+    // texts
+    w.u64(n as u64)?;
+    let mut offsets: Vec<u64> = Vec::with_capacity(n + 1);
+    let mut blob: Vec<u8> = Vec::new();
+    let mut off = 0u64;
+    offsets.push(0);
+    for i in 0..n as u32 {
+        let t = data.texts.text(i);
+        blob.extend_from_slice(t.as_bytes());
+        off += t.len() as u64;
+        offsets.push(off);
     }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    w.u64s(&offsets)?;
+    w.bytes(&blob)?;
+
+    // codebook (flattened)
+    let flat_cb: Vec<f32> = data.codec.codebook.iter().flatten().copied().collect();
+    w.f32s(&flat_cb)?;
+
+    // codes
+    debug_assert_eq!(data.codes.len(), n * data.codec.m);
+    w.bytes(&data.codes)?;
+
+    // graph
+    let g = &data.graph;
+    w.u32(g.n as u32)?;
+    w.u8(g.max_level)?;
+    w.u32(g.entry)?;
+    for &lv in &g.levels {
+        w.u8(lv)?;
+    }
+    // upper-layer lists (only nodes with level >= 1)
+    let mut upper_lists = 0u64;
+    for lists in g.upper.iter() {
+        for lst in lists.iter() {
+            if !lst.is_empty() {
+                upper_lists += 1;
+            }
+        }
+    }
+    w.u64(upper_lists)?;
+    for (node, lists) in g.upper.iter().enumerate() {
+        for (li, lst) in lists.iter().enumerate() {
+            if !lst.is_empty() {
+                w.u32(node as u32)?;
+                w.u8((li + 1) as u8)?;
+                w.u32(lst.len() as u32)?;
+                w.u32s(lst)?;
+            }
+        }
+    }
+    // layer-0 CSR
+    let mut indptr: Vec<u32> = Vec::with_capacity(g.n + 1);
+    indptr.push(0);
+    let mut indices: Vec<u32> = Vec::new();
+    for a in &g.adj0 {
+        indices.extend_from_slice(a);
+        indptr.push(indices.len() as u32);
+    }
+    w.u32s(&indptr)?;
+    w.u32s(&indices)?;
+
+    // tombstones
+    w.u64(data.tombstones.len() as u64)?;
+    w.u64s(data.tombstones)?;
+
+    drop(w);
+    Ok(out)
 }
 
 fn count_bits(words: &[u64]) -> u64 {
@@ -343,12 +367,58 @@ pub struct LoadedIndex {
     pub file_size: u64,
 }
 
-/// Memory-map and parse an index file.
+/// Memory-map and parse an index file (plaintext containers only).
 pub fn read_index(path: &Path) -> Result<LoadedIndex> {
+    read_index_with_passphrase(path, None)
+}
+
+/// Open an index file, transparently handling encrypted containers.
+///
+/// - Plaintext file + `None` passphrase -> mmap zero-copy open.
+/// - Encrypted file + passphrase -> Argon2id derive + AEAD decrypt + parse
+///   (texts are owned in memory; the seal covers the whole payload).
+/// - Encrypted file + `None` passphrase -> error.
+/// - Plaintext file + `Some(_)` passphrase -> error (silently ignoring a
+///   passphrase would be a security footgun).
+pub fn read_index_with_passphrase(path: &Path, passphrase: Option<&str>) -> Result<LoadedIndex> {
     let file = File::open(path)?;
     let file_size = file.metadata()?.len();
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
     let buf: &[u8] = &mmap;
+
+    if buf.len() >= 8 && &buf[0..8] == crate::crypto::MAGIC_ENC {
+        let pp = passphrase.ok_or_else(|| {
+            LeannError::Invalid("index is encrypted: a passphrase is required".into())
+        })?;
+        // container: MAGIC(8) | u32 ver | salt(16) | sealed blob
+        if buf.len() < 8 + 4 + crate::crypto::SALT_LEN {
+            return Err(LeannError::Corrupt("encrypted container truncated".into()));
+        }
+        let ver = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        if ver != crate::crypto::ENC_VERSION {
+            return Err(LeannError::Version {
+                found: ver,
+                expected: crate::crypto::ENC_VERSION,
+            });
+        }
+        let salt = &buf[12..12 + crate::crypto::SALT_LEN];
+        let blob = &buf[12 + crate::crypto::SALT_LEN..];
+        let plain = crate::crypto::unseal_passphrase(pp, salt, blob)?;
+        return parse_index(&plain, None, file_size);
+    }
+
+    if passphrase.is_some() {
+        return Err(LeannError::Invalid(
+            "passphrase given but the file is not encrypted".into(),
+        ));
+    }
+
+    parse_index(buf, Some(&mmap), file_size)
+}
+
+/// Parse a plaintext index payload. `mmap` present -> zero-copy texts;
+/// absent (decrypted buffer) -> owned texts.
+fn parse_index(buf: &[u8], mmap: Option<&Arc<Mmap>>, file_size: u64) -> Result<LoadedIndex> {
     let mut r = R { buf, pos: 0 };
 
     // header
@@ -463,13 +533,29 @@ pub fn read_index(path: &Path) -> Result<LoadedIndex> {
         return Err(LeannError::Corrupt(format!("metadata count mismatch {}", metadatas.len())));
     }
 
-    Ok(LoadedIndex {
-        config,
-        texts: TextStore::Mapped {
-            mmap,
+    let texts = match mmap {
+        Some(mmap) => TextStore::Mapped {
+            mmap: Arc::clone(mmap),
             base: texts_base,
             offsets,
         },
+        None => {
+            let mut v = Vec::with_capacity(n);
+            for i in 0..n {
+                let s = offsets[i] as usize;
+                let e = offsets[i + 1] as usize;
+                let slice = &blob[s..e];
+                v.push(std::str::from_utf8(slice)
+                    .map_err(|_| LeannError::Corrupt("invalid utf8 in texts".into()))?
+                    .to_string());
+            }
+            TextStore::Owned(v)
+        }
+    };
+
+    Ok(LoadedIndex {
+        config,
+        texts,
         metadatas,
         codec,
         codes,

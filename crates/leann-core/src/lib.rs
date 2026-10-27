@@ -28,6 +28,7 @@ pub mod batch;
 pub mod bm25;
 pub mod cache;
 pub mod context;
+pub mod crypto;
 pub mod filter;
 pub mod format;
 pub mod graph;
@@ -36,6 +37,9 @@ pub mod index;
 pub mod metric;
 pub mod pq;
 pub mod search;
+pub mod simd;
+pub mod validate;
+pub mod dedup;
 
 pub use batch::{DynamicBatcher, BatcherStats};
 pub use bm25::{Bm25Index, Bm25Params};
@@ -50,6 +54,9 @@ pub use index::{
     SearchDefaults, SearchHit, SearchOptions, SearchReport, SearchResult,
 };
 pub use metric::Metric;
+pub use simd::{dot, l2_sq, SimdLevel};
+pub use dedup::{DedupMode, Deduper};
+pub use validate::{check_filter_limits, safe_component, validate_base_url};
 pub use pq::{PqCodec, PqConfig};
 
 /// Common error type for the whole crate.
@@ -74,6 +81,8 @@ pub mod error {
     Invalid(String),
         #[error("embedder error: {0}")]
     Embedder(String),
+        #[error("crypto error: {0}")]
+    Crypto(String),
     }
     pub type Result<T> = std::result::Result<T, LeannError>;
 }

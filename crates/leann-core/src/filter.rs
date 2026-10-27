@@ -90,6 +90,13 @@ pub fn parse_filter(json: &str) -> Result<Filter, serde_json::Error> {
     Filter::from_value(&v)
 }
 
+/// Parse with resource-exhaustion guards (depth/size limits).
+pub fn parse_filter_checked(json: &str) -> Result<Filter, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    crate::validate::check_filter_limits(&v).map_err(|e| e.to_string())?;
+    Filter::from_value(&v).map_err(|e| e.to_string())
+}
+
 impl Filter {
     pub fn from_value(v: &Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(v.clone())

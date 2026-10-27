@@ -255,3 +255,26 @@ mod tests {
         assert!(!attrs[0].keep);
     }
 }
+
+/// Offline (deterministic, no judge) sentence-level attribution: each sentence
+/// is checked against the concatenated documents with the local grounding
+/// pre-filters. Fast enough for every-generation gating.
+pub fn sentence_attribution_offline(answer: &str, documents: &[String]) -> Vec<SentenceAttribution> {
+    let ctx = documents.join("\n");
+    split_sentences(answer)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let g = crate::local::local_groundedness(&text, &ctx);
+            SentenceAttribution {
+                index,
+                text,
+                local: g,
+                judge_grounded: None,
+                judge_confidence: None,
+                supporting: Vec::new(),
+                keep: true, // offline mode reports, does not censor
+            }
+        })
+        .collect()
+}

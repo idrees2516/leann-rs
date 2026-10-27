@@ -64,13 +64,13 @@ hallucination elimination.
 
 | Crate | What it does |
 |---|---|
-| **`leann-core`** | The LEANN index: metrics (L2/cosine/IP), PQ codec with parallel training, HNSW build with RNG pruning, **Algorithm 3** hub-preserving pruning, **Algorithm 2** two-level search (AQ/EQ + promotion ratio α), dynamic batching, sharded merge build, BM25, RRF/weighted fusion, JSON metadata filters, neighbor context expansion, dynamic add/delete, atomic single-file mmap format |
+| **`leann-core`** | The LEANN index: **SIMD distance kernels** (AVX-512/AVX2/SSE runtime-detected, 0.05 ns/dim), PQ codec with parallel training, HNSW build with RNG pruning, **Algorithm 3** hub-preserving pruning, **Algorithm 2** two-level search (AQ/EQ + promotion ratio α, allocation-free scratch), dynamic batching, **parallel batch search**, sharded merge build, BM25, RRF/weighted fusion, JSON metadata filters (depth/size-limited), neighbor context expansion, dynamic add/delete, **compaction (tombstone GC)**, **exact + SimHash near-dedup**, **ChaCha20-Poly1305 encryption at rest**, SSRF-hardened URL validation, atomic single-file mmap format |
 | **`leann-embedder`** | `OpenAiEmbedder` (any `/embeddings` endpoint: OpenAI, Ollama, vLLM, SiliconFlow, …; batching, parallel requests, 429/5xx retries) + `LocalHashEmbedder` (deterministic word/bigram/trigram feature hashing — zero deps, zero network) |
 | **`leann-ingest`** | PDF (`pdf-extract`), TXT/LOG, Markdown (heading-aware), HTML (script/style-stripping extractor), DOCX (OOXML), EPUB (spine-ordered), JSON/JSONL, **30+ code languages** (definition-boundary chunking with line ranges), **audio** (ffmpeg → 16k wav → Whisper-compatible transcription, timestamped chunks), **video** (audio track + optional VLM keyframe descriptions). Token-aware chunking with overlap, page/heading/timestamp metadata everywhere |
 | **`leann-chat`** | OpenAI-compatible + Anthropic LLM providers, RAG prompt assembly with `[n]` citations, context budgeting, rolling conversation memory, vision (frame description) |
 | **`leann-guard`** | **IBM Granite Guardian (arXiv:2412.07724) in depth**: the full risk catalog (groundedness, context relevance, answer relevance, social bias, profanity, violence, sexual content, unethical behavior, jailbreak, function-call hallucination, BYOC), the guardian-block judging protocol (think/no-think modes, `<score>` parsing, verbalized confidence), OpenAI-compatible judge client that talks to **served granite-guardian models** or any judge LLM, deterministic local pre-filters (number consistency, term coverage, citation validation), **sentence-level attribution**, **grounded rewriting** (elimination), composite `RagGuard` gate (Abstain/Repair/Annotate/Log policies) and a generate→guard→repair loop. Fully standalone — usable from any app |
-| **`leann-node`** | napi-rs bindings: `Leann` class (addFiles/addTexts/search/hybridSearch/chat with guard/delete/save), `Collections` (multi-user isolation), standalone `Guardian` class, `verifyAnswer` audits |
-| **`leann-cli`** | `leann add/search/chat/guard/stats/delete` |
+| **`leann-node`** | napi-rs bindings: `Leann` class (addFiles/addTexts/search/**searchBatch** (parallel)/hybridSearch/chat with guard/delete/**compact**/**saveEncrypted**/**openEncrypted**/**addTextsDedup**), `Collections` (multi-user isolation, traversal-safe), standalone `Guardian` class, `verifyAnswer` audits, offline `localGrounding`/`localVerify`/`localRewrite`, `simdLevel()` |
+| **`leann-cli`** | `leann add/search/chat/guard/stats/delete/compact` + **`leann mcp`**: a Model Context Protocol stdio server exposing 8 tools (search, hybrid search, ingest, RAG chat, hallucination audit, stats, delete-where, compact) — drop LEANN into Claude Desktop or any MCP client as a retrieval tool |
 
 ## Quick start
 
@@ -118,6 +118,14 @@ export OPENAI_API_KEY=sk-...
 leann chat "How does LEANN reduce storage?" --guard \
   --guard-base-url http://localhost:11434/v1 \
   --guard-model ibm-granite/granite-guardian-3.3-8b
+
+# maintenance: garbage-collect deleted chunks
+leann compact
+
+# agent-native: run LEANN as an MCP tool server (Claude Desktop, Cursor, ...)
+leann mcp --index ./knowledge.leann
+# exposes: leann_search, leann_add_files, leann_add_texts, leann_chat,
+#          leann_guard, leann_stats, leann_delete_where, leann_compact
 ```
 
 ### TypeScript / Node
@@ -246,6 +254,17 @@ pq codebook (f32) | pq codes (m bytes/chunk)
 graph: levels + upper lists + CSR adjacency | tombstones bitmap
 ```
 
+**Encrypted at rest** (optional, memvid-parity): `save_encrypted(path, passphrase)`
+seals the entire payload with ChaCha20-Poly1305 under an Argon2id-derived key
+(`LEANNENC` magic). Texts, codes, graph and metadata are all inside the seal —
+a stolen file leaks nothing, and tampering fails authentication:
+
+```rust
+idx.save_encrypted("bank.leann", "correct horse battery staple")?;
+let idx = LeannIndex::open_with_passphrase(
+    "bank.leann", "correct horse battery staple", provider)?;
+```
+
 ## Configuration
 
 Embedder / LLM / transcriber / guardian all resolve from env when not given
@@ -253,16 +272,47 @@ explicitly: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `LEANN_EMBED_MODEL`,
 `LEANN_LLM_BASE_URL`, `LEANN_LLM_API_KEY`, `LEANN_LLM_MODEL`,
 `ANTHROPIC_API_KEY`, `LEANN_EMBEDDER=local` (offline mode).
 
-## Benchmarks
+## Performance
+
+Measured with the criterion suite (`cargo bench -p leann-core`), 2-core
+x86_64 (AVX-512), quick mode:
+
+| Kernel | Result | Note |
+|---|---|---|
+| `dot` dim=768 (AVX-512) | **40 ns** (0.05 ns/dim) | 2.5× faster than portable |
+| `dot` dim=1536 | 87 ns | 2.4× faster than portable |
+| `l2_sq` dim=768 | 48 ns | 2.1× faster than portable |
+| PQ ADC distance (m=32) | **26 ns** per vector | LUT: `m` adds + lookups |
+| PQ ADC table build | 68 µs | once per query |
+| Two-level search, 10k chunks, warm cache | **91 µs** | reused scratch: −10 µs alloc overhead |
+| Hybrid search (vector + BM25 + RRF), 5k chunks | 274 µs | |
+| SimHash (near-dup check) | 2.8 µs per chunk | |
+| Argon2id key derivation | 17 ms | once per open, by design |
+| ChaCha20-Poly1305 seal/unseal, 64 KiB | 49 µs | |
+
+Steady-state search is **allocation-free**: the hot loop runs on
+generation-stamped flat arrays (no HashMap/HashSet traffic), the embed cache
+is sharded across threads, and batch queries fan out across rayon workers
+with per-thread scratch. `searchBatch` embeds all queries in one provider
+call, then searches them in parallel — on this 2-core box a 64-query batch
+runs in 10.4 ms (~160 µs/query amortized); scaling follows cores.
 
 ```sh
-cargo bench -p leann-core   # PQ train/encode/ADC, graph build/prune/search,
-                            # two-level search @ 2k/10k, end-to-end index ops
+cargo bench -p leann-core   # SIMD kernels, PQ, graph, two-level search,
+                            # hot-path (fresh vs reused scratch), batch
+                            # parallelism, dedup + crypto
 ```
 
 ## Testing
 
-83 unit + integration tests across the workspace, including:
+104 unit + integration tests across the workspace, including:
+- SIMD kernels agree with portable loops across dims (incl. odd/tail lengths)
+- scratch-reuse search ≡ fresh-scratch search (generation-stamp correctness)
+- compaction: tombstone GC + id remap + save/load roundtrip (regression)
+- encryption: roundtrip, wrong-passphrase, bit-flip, truncation rejection
+- dedup: exact + near (calibrated thresholds), short-text fallback
+- URL validation (SSRF), filter depth/size limits, path traversal
+- MCP server schema + live JSON-RPC session
 - recall@k of two-level search vs brute force (≥0.8 asserted)
 - hub-prune recall preservation, sharded ≈ single-build parity
 - save/load byte-identical results, add/delete dynamics

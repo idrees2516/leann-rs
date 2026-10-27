@@ -221,6 +221,8 @@ export interface GuardianVerdictJs {
 export declare class Leann {
   constructor(opts: LeannOptions)
   static open(path: string, opts: LeannOptions): Leann
+  /** Open an encrypted index file. */
+  static openEncrypted(path: string, passphrase: string, opts: LeannOptions): Leann
   addFiles(paths: Array<string>, args?: IngestArgs): Promise<AddResult>
   addTexts(texts: Array<string>, metadatas?: Array<any>): Promise<AddResult>
   search(query: string, args?: SearchArgs): Promise<SearchResultJs>
@@ -232,6 +234,14 @@ export declare class Leann {
   deleteWhere(filter: any): number
   getChunk(id: number): any
   save(path: string): void
+  /** Save encrypted at rest (ChaCha20-Poly1305 + Argon2id). */
+  saveEncrypted(path: string, passphrase: string): void
+  /** Garbage-collect deleted chunks; returns old->new id map (0xFFFFFFFF = deleted). */
+  compact(): Array<number>
+  /** Batch search: one embed call + parallel search across cores. */
+  searchBatch(queries: Array<string>, args?: SearchArgs): Promise<Array<SearchResultJs>>
+  /** Add texts with duplicate suppression ("exact" | "near"). */
+  addTextsDedup(texts: Array<string>, metadatas?: Array<any>, mode?: string): Promise<AddDedupResultJs>
   stats(): StatsJs
   /** IBM Granite Guardian sentence-level grounding audit of any answer */
   verifyAnswer(answer: string, context: Array<string>): Array<VerifiedSentenceJs>
@@ -307,3 +317,11 @@ export declare function localVerify(answer: string, contexts: Array<string>): Ar
 
 /** Offline grounded rewrite: answer with ungrounded sentences removed (no LLM). */
 export declare function localRewrite(answer: string, contexts: Array<string>): string
+
+export interface AddDedupResultJs {
+  chunkIds: Array<number>
+  duplicatesSkipped: number
+}
+
+/** SIMD kernel level on this CPU: "avx512" | "avx2" | "sse" | "none". */
+export declare function simdLevel(): string

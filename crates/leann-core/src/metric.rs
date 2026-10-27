@@ -1,11 +1,14 @@
 //! Distance metrics.
 //!
-//! All hot kernels are written as plain `f32` loops over slices so that
-//! `rustc` auto-vectorizes them into AVX2/SSE code paths. For cosine we
-//! pre-normalize vectors at embed time so the metric collapses to a dot
-//! product plus a subtract — a single fused pass.
+//! All kernels dispatch through [`crate::simd`], which picks the best
+//! CPU-supported implementation (AVX-512F / AVX2+FMA / SSE4.1 / portable)
+//! once per process. For cosine we pre-normalize vectors at embed time so
+//! the metric collapses to a dot product plus a subtract — a single fused
+//! pass.
 
 use serde::{Deserialize, Serialize};
+
+pub use crate::simd::{l2_sq, dot};
 
 /// Supported distance metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -36,57 +39,6 @@ impl Metric {
     pub fn needs_normalization(self) -> bool {
         matches!(self, Metric::Cosine)
     }
-}
-
-/// Dot product. Auto-vectorizes to a single fused-multiply-add pass.
-#[inline]
-pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0f32; 4];
-    let n = a.len();
-    let chunks = n / 4;
-    let rem = n % 4;
-    let (a4, ar) = a.split_at(chunks * 4);
-    let (b4, br) = b.split_at(chunks * 4);
-    for i in 0..chunks {
-        acc[0] += a4[i * 4] * b4[i * 4];
-        acc[1] += a4[i * 4 + 1] * b4[i * 4 + 1];
-        acc[2] += a4[i * 4 + 2] * b4[i * 4 + 2];
-        acc[3] += a4[i * 4 + 3] * b4[i * 4 + 3];
-    }
-    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    for i in 0..rem {
-        s += ar[i] * br[i];
-    }
-    s
-}
-
-/// Squared L2 distance. Auto-vectorizes similarly.
-#[inline]
-pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0f32; 4];
-    let n = a.len();
-    let chunks = n / 4;
-    let rem = n % 4;
-    let (a4, ar) = a.split_at(chunks * 4);
-    let (b4, br) = b.split_at(chunks * 4);
-    for i in 0..chunks {
-        let d0 = a4[i * 4] - b4[i * 4];
-        let d1 = a4[i * 4 + 1] - b4[i * 4 + 1];
-        let d2 = a4[i * 4 + 2] - b4[i * 4 + 2];
-        let d3 = a4[i * 4 + 3] - b4[i * 4 + 3];
-        acc[0] += d0 * d0;
-        acc[1] += d1 * d1;
-        acc[2] += d2 * d2;
-        acc[3] += d3 * d3;
-    }
-    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    for i in 0..rem {
-        let d = ar[i] - br[i];
-        s += d * d;
-    }
-    s
 }
 
 /// L2-normalize a vector in place. Zero vectors are left untouched.

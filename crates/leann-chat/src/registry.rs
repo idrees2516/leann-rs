@@ -58,7 +58,7 @@ pub fn create_llm(cfg: &LlmConfig) -> Result<Arc<dyn LlmProvider>> {
                 .clone()
                 .or_else(|| std::env::var("LEANN_LLM_MODEL").ok())
                 .unwrap_or_else(|| "gpt-4o-mini".to_string());
-            Ok(Arc::new(OpenAiLlm::new(base_url, api_key, model)))
+            Ok(Arc::new(OpenAiLlm::new(base_url, api_key, model).map_err(crate::ChatError::Invalid)?))
         }
         LlmKind::Anthropic => {
             let api_key = cfg

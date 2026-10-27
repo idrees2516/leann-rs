@@ -76,6 +76,6 @@ mod tests {
             "text-embedding-3-small",
             1536,
         );
-        assert_eq!(e.dim(), 1536);
+        assert_eq!(e.expect("valid default url").dim(), 1536);
     }
 }

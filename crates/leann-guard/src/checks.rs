@@ -202,7 +202,6 @@ impl Guardian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::judge::MockJudge;
 
     #[test]
     fn groundedness_via_guardian() {

@@ -18,15 +18,19 @@ pub struct OpenAiLlm {
 }
 
 impl OpenAiLlm {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> std::result::Result<Self, String> {
+        let raw: String = base_url.into();
+        let trimmed = raw.trim_end_matches('/');
+        let validated = leann_core::validate_base_url(trimmed)
+            .map_err(|e| format!("invalid base URL: {e}"))?;
+        Ok(Self {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(300))
                 .build(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: validated.to_string(),
             api_key: api_key.into(),
             model: model.into(),
-        }
+        })
     }
 
     fn post_chat(&self, body: Value) -> Result<String> {
@@ -97,7 +101,7 @@ pub fn describe_image(
         Some("webp") => "image/webp",
         _ => "image/jpeg",
     };
-    let client = OpenAiLlm::new(base_url, api_key, model);
+    let client = OpenAiLlm::new(base_url, api_key, model).map_err(ChatError::Invalid)?;
     let body = json!({
         "model": model,
         "messages": [{
