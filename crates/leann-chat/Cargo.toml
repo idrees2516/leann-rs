@@ -1,0 +1,16 @@
+[package]
+name = "leann-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLM chat providers (OpenAI-compatible, Anthropic) and RAG pipeline for LEANN"
+
+[dependencies]
+leann-core = { path = "../leann-core" }
+leann-guard = { path = "../leann-guard" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { version = "2", features = ["json", "tls"] }
+leann-ingest = { path = "../leann-ingest" }
+base64 = "0.22"

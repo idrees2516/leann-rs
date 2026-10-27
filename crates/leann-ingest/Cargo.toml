@@ -1,0 +1,16 @@
+[package]
+name = "leann-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Multi-format document ingestion for LEANN: PDF/TXT/MD/HTML/DOCX/EPUB/code parsers, audio/video pipelines, token-aware chunking"
+
+[dependencies]
+leann-core = { path = "../leann-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+pdf-extract = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ureq = { version = "2", features = ["json", "tls"] }

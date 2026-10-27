@@ -1,0 +1,7 @@
+/target
+node_modules/
+*.node
+*.leann
+.DS_Store
+.env
+dist/

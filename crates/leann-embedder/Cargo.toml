@@ -1,0 +1,14 @@
+[package]
+name = "leann-embedder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedding providers for LEANN: OpenAI-compatible API embedder + zero-dependency local fallback"
+
+[dependencies]
+leann-core = { path = "../leann-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+ureq = { version = "2", features = ["json", "tls"] }

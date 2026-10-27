@@ -1,0 +1,25 @@
+[package]
+name = "leann-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LEANN core: storage-efficient vector index with PQ filtering, hub-preserving graph pruning, two-level search, BM25 hybrid retrieval"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+leann-embedder = { path = "../leann-embedder" }
+leann-ingest = { path = "../leann-ingest" }
+leann-chat = { path = "../leann-chat" }
+leann-guard = { path = "../leann-guard" }
+
+[[bench]]
+name = "core"
+harness = false

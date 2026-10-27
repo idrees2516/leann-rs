@@ -1,0 +1,31 @@
+{
+  "name": "leann-node",
+  "version": "0.1.0",
+  "description": "LEANN: storage-efficient vector search + agentic RAG for all document formats (PDF, TXT, audio, video, code) — Rust-powered, TypeScript-native",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "leann",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/idrees2516/leann-rs"
+  },
+  "keywords": ["vector-search", "rag", "ann", "leann", "embeddings", "hybrid-search", "bm25", "hallucination", "agentic"],
+  "files": ["index.js", "index.d.ts", "README.md"],
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "engines": {
+    "node": ">= 16"
+  }
+}

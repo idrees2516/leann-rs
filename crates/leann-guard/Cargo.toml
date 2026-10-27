@@ -1,0 +1,13 @@
+[package]
+name = "leann-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IBM Granite Guardian (arXiv:2412.07724) in depth: hallucination elimination for RAG — groundedness, context relevance, answer relevance, harm & jailbreak detection, guardian-block judging, sentence-level attribution, repair loops. Standalone: usable from any app."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+ureq = { version = "2", features = ["json", "tls"] }
