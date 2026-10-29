@@ -1064,6 +1064,52 @@ impl Leann {
         }
     }
 
+    /// Export the live corpus: "json" (leann-export/v1), "csv" or "md".
+    #[napi]
+    pub async fn exportCorpus(&self, format: Option<String>) -> Result<String> {
+        use leann_core::export::ExportFormat;
+        let fmt = ExportFormat::parse(&format.unwrap_or_else(|| "json".into()))
+            .ok_or_else(|| napi::Error::new(
+                napi::Status::InvalidArg,
+                "format must be one of json|csv|md".to_string(),
+            ))?;
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let idx = inner.read().unwrap();
+            Ok(leann_core::export::export_string(&idx, fmt))
+        })
+        .await
+        .map_err(to_napi_err)?
+    }
+
+    /// Import a `leann-export/v1` JSON document (or bare chunk array) into
+    /// this index. Returns the number of chunks added.
+    #[napi]
+    pub async fn importJson(&self, json: String) -> Result<u32> {
+        let imported = leann_core::export::import_json(&json)
+            .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e))?;
+        if imported.is_empty() {
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "nothing to import".to_string(),
+            ));
+        }
+        let inner = self.inner.clone();
+        let n = tokio::task::spawn_blocking(move || -> leann_core::Result<usize> {
+            let mut idx = inner.write().unwrap();
+            let texts: Vec<String> = imported.iter().map(|c| c.text.clone()).collect();
+            let metas: Vec<serde_json::Value> =
+                imported.iter().map(|c| c.metadata.clone()).collect();
+            let n = texts.len();
+            idx.add(&texts, Some(metas))?;
+            Ok(n)
+        })
+        .await
+        .map_err(to_napi_err)?
+        .map_err(to_napi_err)?;
+        Ok(n as u32)
+    }
+
     /// Attach or replace the IBM Granite Guardian judge at runtime.
     #[napi]
     pub fn set_guardian(&mut self, opts: GuardianOptions) {

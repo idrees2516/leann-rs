@@ -45,7 +45,12 @@ impl Format {
             "rs" | "py" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "go" | "java" | "c"
             | "h" | "cpp" | "cc" | "hpp" | "cs" | "rb" | "php" | "swift" | "kt" | "scala"
             | "sh" | "bash" | "zsh" | "sql" | "lua" | "r" | "m" | "pl" | "ex" | "exs"
-            | "hs" | "clj" | "dart" | "zig" | "nim" | "v" | "vue" | "svelte" => Format::Code,
+            | "hs" | "clj" | "dart" | "zig" | "nim" | "v" | "vue" | "svelte"
+            // config / data / styling — real-world corpora are full of these
+            | "toml" | "yaml" | "yml" | "xml" | "csv" | "tsv" | "css" | "scss" | "less"
+            | "ini" | "cfg" | "conf" | "env" | "properties" | "gradle" | "makefile" | "mk"
+            | "dockerfile" | "proto" | "graphql" | "gql" | "tex" | "sol" | "asm" | "s"
+            | "bat" | "ps1" | "rake" | "gemspec" | "podspec" | "lock" => Format::Code,
             "json" => Format::Json,
             "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" | "aiff" => {
                 Format::Audio
@@ -76,6 +81,22 @@ impl Format {
             "scala" => "scala",
             "sh" | "bash" | "zsh" => "shell",
             "sql" => "sql",
+            "toml" => "toml",
+            "yaml" | "yml" => "yaml",
+            "xml" => "xml",
+            "csv" | "tsv" => "csv",
+            "css" | "scss" | "less" => "css",
+            "ini" | "cfg" | "conf" | "env" | "properties" => "ini",
+            "gradle" => "gradle",
+            "makefile" | "mk" => "make",
+            "dockerfile" => "dockerfile",
+            "proto" => "protobuf",
+            "graphql" | "gql" => "graphql",
+            "tex" => "latex",
+            "sol" => "solidity",
+            "asm" | "s" => "asm",
+            "bat" => "batch",
+            "ps1" => "powershell",
             "lua" => "lua",
             "r" => "r",
             "pl" => "perl",

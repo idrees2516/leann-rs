@@ -106,6 +106,61 @@ enum Cmd {
     },
     /// Delete chunks matching a JSON filter
     Delete { filter: String },
+    /// Export the live corpus as JSON / CSV / Markdown
+    Export {
+        /// json | csv | md
+        #[arg(default_value = "json")]
+        format: String,
+        /// Output file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// QR-code video memory (memvid-style): corpus in, portable video out
+    Visual {
+        #[command(subcommand)]
+        cmd: VisualCmd,
+    },
+    /// Serve the REST API + web playground for real-world integrations
+    Serve {
+        #[arg(long, default_value = "8080")]
+        port: u16,
+        #[arg(long, default_value = "./leann-data")]
+        data_dir: PathBuf,
+        /// Require this API key (also LEANN_API_KEY env; unset = open server)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Requests per client per minute (0 = unlimited)
+        #[arg(long, default_value = "240")]
+        rate_limit: u32,
+        /// Allowed CORS origin (repeatable)
+        #[arg(long = "allow-origin")]
+        allow_origins: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum VisualCmd {
+    /// Build a QR-code video from the index's live chunks
+    Build {
+        /// Output video path (.mp4 or .gif)
+        #[arg(long, default_value = "memory.mp4")]
+        output: PathBuf,
+        /// auto | mp4 | gif (auto = mp4 when ffmpeg is installed)
+        #[arg(long, default_value = "auto")]
+        format: String,
+        /// Pixels per QR module
+        #[arg(long, default_value = "8")]
+        scale: u32,
+    },
+    /// Semantic search; hit text is decoded straight out of the video
+    Query {
+        query: String,
+        /// Video memory file
+        #[arg(long, default_value = "memory.mp4")]
+        video: PathBuf,
+        #[arg(long, default_value = "5")]
+        k: usize,
+    },
 }
 
 fn embedder_from_env() -> EmbedderConfig {
@@ -162,6 +217,22 @@ fn main() {
         Cmd::Mcp { passphrase } => {
             let _ = passphrase; // encrypted MCP indexes: LEANN_PASSPHRASE env
             std::process::exit(mcp::run(cli.index));
+        }
+        Cmd::Export { format, out } => cmd_export(&cli.index, provider, &format, out),
+        Cmd::Visual { cmd } => cmd_visual(&cli.index, provider, cmd),
+        Cmd::Serve { port, data_dir, api_key, rate_limit, allow_origins } => {
+            let mut cfg = leann_server::ServerConfig {
+                data_dir,
+                ..Default::default()
+            };
+            cfg.api_key = api_key.or_else(|| std::env::var("LEANN_API_KEY").ok());
+            cfg.rate_limit_per_min = rate_limit;
+            if !allow_origins.is_empty() {
+                cfg.allow_origins = allow_origins;
+            }
+            let addr = format!("0.0.0.0:{port}");
+            leann_server::serve(&addr, cfg);
+            Ok(())
         }
     };
     if let Err(e) = r {
@@ -481,6 +552,63 @@ fn cmd_delete(
     idx.save(index_path).map_err(|e| e.to_string())?;
     println!("deleted {} chunks", n);
     Ok(())
+}
+
+fn cmd_export(
+    index_path: &PathBuf,
+    provider: Arc<dyn leann_core::cache::EmbeddingProvider>,
+    format: &str,
+    out: Option<PathBuf>,
+) -> Result<(), String> {
+    use leann_core::export::ExportFormat;
+    let fmt = ExportFormat::parse(format).ok_or_else(|| format!("unknown format '{format}' (json|csv|md)"))?;
+    let idx = open_or_hint(index_path, provider)?;
+    let body = leann_core::export::export_string(&idx, fmt);
+    match out {
+        Some(path) => {
+            std::fs::write(&path, body).map_err(|e| e.to_string())?;
+            eprintln!("exported {} live chunks to {}", idx.alive_count(), path.display());
+        }
+        None => print!("{body}"),
+    }
+    Ok(())
+}
+
+fn cmd_visual(
+    index_path: &PathBuf,
+    provider: Arc<dyn leann_core::cache::EmbeddingProvider>,
+    cmd: VisualCmd,
+) -> Result<(), String> {
+    use leann_visual::{build_visual_from_index, VideoFormat, VisualOptions, VisualRetriever};
+    match cmd {
+        VisualCmd::Build { output, format, scale } => {
+            let idx = open_or_hint(index_path, provider)?;
+            let fmt = VideoFormat::parse(&format)
+                .ok_or_else(|| format!("unknown format '{format}' (auto|mp4|gif)"))?;
+            let opts = VisualOptions { scale, format: fmt, ..Default::default() };
+            let stats = build_visual_from_index(&idx, &output, opts).map_err(|e| e.to_string())?;
+            eprintln!(
+                "video memory: {} chunks → {} ({} bytes, {:.2} bytes per text byte)",
+                stats.chunks,
+                stats.video_path.display(),
+                stats.video_bytes,
+                stats.bytes_per_text_byte
+            );
+            eprintln!("sidecar: {}", stats.sidecar_path.display());
+            Ok(())
+        }
+        VisualCmd::Query { query, video, k } => {
+            let idx = open_or_hint(index_path, provider)?;
+            let r = VisualRetriever::open(&video).map_err(|e| e.to_string())?;
+            let hits = r.search(&idx, &query, k).map_err(|e| e.to_string())?;
+            println!("container: {} ({} chunks)", r.container(), r.chunk_count());
+            for (i, h) in hits.iter().enumerate() {
+                println!("#{:<3} id={:<6} sim={:.4} frame={:<5}", i + 1, h.id, h.similarity, h.frame);
+                println!("     {}", preview(&h.text, 160));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn preview(s: &str, n: usize) -> String {

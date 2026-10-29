@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-83%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-131%20passing-brightgreen)]()
 
 `leann-rs` is a from-scratch Rust implementation of the **LEANN** paradigm
 ([*LEANN: A Low-Storage Overhead Vector Index*, arXiv:2506.08276](https://arxiv.org/abs/2506.08276))
@@ -38,8 +38,12 @@ elimination.
    │  cited context assembly, rolling memory, guarded answers       │
    └──────────────────────────────────────────────────────────────┘
         │
-        ├── leann-node  → napi-rs TypeScript bindings (Node 16+)
-        └── leann-cli   → `leann add | search | chat | guard | stats`
+        ├── leann-visual → QR-code video memory: the corpus as a portable MP4/GIF
+        │                  (memvid-style) with random-access frame retrieval
+        ├── leann-server → REST API + web playground (auth, rate limit, CORS)
+        ├── leann-node   → napi-rs TypeScript bindings (Node 16+)
+        └── leann-cli    → `leann add | search | chat | guard | stats | export |
+                            visual build | visual query | serve | mcp`
 ```
 
 ## Why
@@ -64,13 +68,15 @@ hallucination elimination.
 
 | Crate | What it does |
 |---|---|
-| **`leann-core`** | The LEANN index: **SIMD distance kernels** (AVX-512/AVX2/SSE runtime-detected, 0.05 ns/dim), PQ codec with parallel training, HNSW build with RNG pruning, **Algorithm 3** hub-preserving pruning, **Algorithm 2** two-level search (AQ/EQ + promotion ratio α, allocation-free scratch), dynamic batching, **parallel batch search**, sharded merge build, BM25, RRF/weighted fusion, JSON metadata filters (depth/size-limited), neighbor context expansion, dynamic add/delete, **compaction (tombstone GC)**, **exact + SimHash near-dedup**, **ChaCha20-Poly1305 encryption at rest**, SSRF-hardened URL validation, atomic single-file mmap format |
+| **`leann-core`** | The LEANN index: **SIMD distance kernels** (AVX-512/AVX2/SSE runtime-detected, 0.05 ns/dim), PQ codec with parallel training, HNSW build with RNG pruning, **Algorithm 3** hub-preserving pruning, **Algorithm 2** two-level search (AQ/EQ + promotion ratio α, allocation-free scratch), dynamic batching, **parallel batch search**, sharded merge build, BM25, RRF/weighted fusion, JSON metadata filters (depth/size-limited), neighbor context expansion, dynamic add/delete, **compaction (tombstone GC)**, **exact + SimHash near-dedup**, **ChaCha20-Poly1305 encryption at rest**, SSRF-hardened URL validation, atomic single-file mmap format, **export/import (JSON / CSV / Markdown)** |
 | **`leann-embedder`** | `OpenAiEmbedder` (any `/embeddings` endpoint: OpenAI, Ollama, vLLM, SiliconFlow, …; batching, parallel requests, 429/5xx retries) + `LocalHashEmbedder` (deterministic word/bigram/trigram feature hashing — zero deps, zero network) |
-| **`leann-ingest`** | PDF (`pdf-extract`), TXT/LOG, Markdown (heading-aware), HTML (script/style-stripping extractor), DOCX (OOXML), EPUB (spine-ordered), JSON/JSONL, **30+ code languages** (definition-boundary chunking with line ranges), **audio** (ffmpeg → 16k wav → Whisper-compatible transcription, timestamped chunks), **video** (audio track + optional VLM keyframe descriptions). Token-aware chunking with overlap, page/heading/timestamp metadata everywhere |
+| **`leann-ingest`** | PDF (`pdf-extract`), TXT/LOG, Markdown (heading-aware), HTML (script/style-stripping extractor), DOCX (OOXML), EPUB (spine-ordered), JSON/JSONL, **55+ source/config formats** (Rust, Python, TS/JS, Go, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Shell, SQL, Lua, R, Perl, Elixir, Haskell, Clojure, Dart, Zig, Nim, Vue, Svelte, TOML, YAML, XML, CSV, CSS, INI, Protobuf, GraphQL, LaTeX, Solidity, Assembly, Batch, PowerShell…; definition-boundary chunking with line ranges), **audio** (ffmpeg → 16k wav → Whisper-compatible transcription, timestamped chunks), **video** (audio track + optional VLM keyframe descriptions). Token-aware chunking with overlap, page/heading/timestamp metadata everywhere |
 | **`leann-chat`** | OpenAI-compatible + Anthropic LLM providers, RAG prompt assembly with `[n]` citations, context budgeting, rolling conversation memory, vision (frame description) |
 | **`leann-guard`** | **IBM Granite Guardian (arXiv:2412.07724) in depth**: the full risk catalog (groundedness, context relevance, answer relevance, social bias, profanity, violence, sexual content, unethical behavior, jailbreak, function-call hallucination, BYOC), the guardian-block judging protocol (think/no-think modes, `<score>` parsing, verbalized confidence), OpenAI-compatible judge client that talks to **served granite-guardian models** or any judge LLM, deterministic local pre-filters (number consistency, term coverage, citation validation), **sentence-level attribution**, **grounded rewriting** (elimination), composite `RagGuard` gate (Abstain/Repair/Annotate/Log policies) and a generate→guard→repair loop. Fully standalone — usable from any app |
-| **`leann-node`** | napi-rs bindings: `Leann` class (addFiles/addTexts/search/**searchBatch** (parallel)/hybridSearch/chat with guard/delete/**compact**/**saveEncrypted**/**openEncrypted**/**addTextsDedup**), `Collections` (multi-user isolation, traversal-safe), standalone `Guardian` class, `verifyAnswer` audits, offline `localGrounding`/`localVerify`/`localRewrite`, `simdLevel()` |
-| **`leann-cli`** | `leann add/search/chat/guard/stats/delete/compact` + **`leann mcp`**: a Model Context Protocol stdio server exposing 8 tools (search, hybrid search, ingest, RAG chat, hallucination audit, stats, delete-where, compact) — drop LEANN into Claude Desktop or any MCP client as a retrieval tool |
+| **`leann-visual`** | **QR-code video memory** (memvid parity, in Rust): encode the corpus as one portable **MP4** (lossless H.264 via ffmpeg, all-intra frames for instant seeks) or **pure-Rust GIF** (zero system deps, auto-fallback) — one QR per frame, chunks auto-split across frames with UTF-8-safe framing, sidecar maps ids → frames (text lives *only* in the video), sub-second random-access retrieval, semantic search that decodes hit text straight out of the video |
+| **`leann-server`** | **Production REST API** (axum): multi-collection store, search/hybrid/chat/guard, text+file ingestion, delete-by-filter, **export/import (JSON/CSV/Markdown)**, visual-memory build + search, stats — with bearer/X-API-Key auth (constant-time compare), per-client token-bucket rate limiting, strict name/path validation, configurable body limit + CORS, `spawn_blocking` around every index/LLM call, and an embedded **web playground** at `GET /` (zero build step) |
+| **`leann-node`** | napi-rs bindings: `Leann` class (addFiles/addTexts/search/**searchBatch** (parallel)/hybridSearch/chat with guard/delete/**compact**/**saveEncrypted**/**openEncrypted**/**addTextsDedup**/**exportCorpus**/**importJson**), `Collections` (multi-user isolation, traversal-safe), standalone `Guardian` class, `verifyAnswer` audits, offline `localGrounding`/`localVerify`/`localRewrite`, `simdLevel()` |
+| **`leann-cli`** | `leann add/search/chat/guard/stats/delete/compact/export/visual/serve` + **`leann mcp`**: a Model Context Protocol stdio server exposing 8 tools (search, hybrid search, ingest, RAG chat, hallucination audit, stats, delete-where, compact) — drop LEANN into Claude Desktop or any MCP client as a retrieval tool |
 
 ## Quick start
 
@@ -121,6 +127,18 @@ leann chat "How does LEANN reduce storage?" --guard \
 
 # maintenance: garbage-collect deleted chunks
 leann compact
+
+# export the live corpus (round-trips through importJson / the REST API)
+leann export json --out corpus.json
+leann export csv  --out corpus.csv
+leann export md   --out corpus.md
+
+# QR-code video memory: the whole corpus as one portable video (memvid, in Rust)
+leann visual build --output memory.mp4          # lossless H.264 via ffmpeg
+leann visual query "hub pruning" --video memory.mp4   # text decoded from the video
+
+# real-world exposure: REST API + web playground at http://localhost:8080/
+leann serve --port 8080 --data-dir ./leann-data --api-key my-secret
 
 # agent-native: run LEANN as an MCP tool server (Claude Desktop, Cursor, ...)
 leann mcp --index ./knowledge.leann
@@ -243,6 +261,84 @@ println!("{}", decision.answer);                  // grounded subset or refusal
 println!("{:?}", decision.report.action);          // Passed | Rewritten | Rejected
 ```
 
+## QR-code video memory — `leann-visual`
+
+The memvid signature feature, ported to Rust with lossless retrieval: every
+chunk becomes a QR code on one video frame; a JSON sidecar maps chunk ids →
+frame ranges. **The chunk text exists only in the video** — the file you share,
+archive, or play is the database.
+
+```rust
+use leann_visual::{build_visual_from_index, VisualRetriever, VisualOptions};
+
+// 1) encode an index's live corpus into memory.mp4 (+ memory.mp4.leannvid.json)
+let stats = build_visual_from_index(&idx, "memory.mp4".as_ref(),
+                                    VisualOptions::default())?;
+
+// 2) random access + semantic search, text decoded out of the video
+let retriever = VisualRetriever::open("memory.mp4".as_ref())?;
+let chunk = retriever.get_chunk(0)?;                    // frame-accurate seek
+for hit in retriever.search(&idx, "hub pruning", 5)? {  // LEANN search + QR decode
+    println!("frame {}: {}", hit.frame, hit.text);
+}
+```
+
+Why it's safe to put text in pixels:
+
+* **Containers** — MP4 via ffmpeg (`-qp 0` mathematically-lossless H.264,
+  `-g 1` all-intra so `-ss` seeks are instant) when available; pure-Rust GIF
+  otherwise (auto-selected by `VideoFormat::Auto`, so it works everywhere).
+* **Framing** — each QR frame carries a 5-byte ASCII-safe header
+  (`last/seq/len`, 7-bit fields); oversized chunks auto-split across
+  consecutive frames with a shrinking-size ladder that guarantees every
+  frame is QR-encodable *and* valid UTF-8 (string decoders like rqrr and
+  phone cameras depend on this).
+* **Verification** — decoded chunks are byte-compared to the source in tests,
+  including multi-frame CJK/emoji payloads and a 356-chunk self-ingest of
+  this repository's source code (see `scripts/e2e_self.sh`).
+
+## REST API server — `leann-server`
+
+One binary exposes the whole stack to real-world systems (any language, any
+platform): multi-collections, retrieval, guarded RAG chat, ingestion,
+export/import and QR-video memory, plus a built-in web playground.
+
+```sh
+export LEANN_EMBEDDER=local            # offline embedder; OPENAI_API_KEY for quality
+leann serve --port 8080 --data-dir ./leann-data --api-key my-secret
+# → http://localhost:8080/            web playground (search / chat / stats)
+```
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | liveness + version + auth mode |
+| `GET` / `POST` | `/collections` | list / create collections |
+| `GET` / `DELETE` | `/collections/{name}` | stats / drop a collection |
+| `POST` | `/collections/{name}/texts` | add texts (+ optional metadata, dedup) |
+| `POST` | `/collections/{name}/files` | ingest files (path-scoped: `LEANN_INGEST_ROOT`) |
+| `POST` | `/collections/{name}/search` | vector search (k, JSON filter) |
+| `POST` | `/collections/{name}/hybrid` | vector + BM25 + RRF fusion |
+| `POST` | `/collections/{name}/chat` | RAG chat with citations (optional `guard: true`) |
+| `POST` | `/collections/{name}/guard` | offline groundedness audit of any answer |
+| `POST` | `/collections/{name}/delete` | delete-by-filter |
+| `GET` | `/collections/{name}/export?format=json\|csv\|md` | export the live corpus |
+| `POST` | `/collections/{name}/import` | import a `leann-export/v1` document |
+| `POST` | `/collections/{name}/visual` | build the QR-video memory (mp4/gif/auto) |
+| `POST` | `/collections/{name}/visual-search` | search; hit text decoded from the video |
+
+```sh
+curl -H "x-api-key: my-secret" -H 'content-type: application/json' \
+     -X POST localhost:8080/collections/self/search \
+     -d '{"query": "hub preserving pruning", "k": 3}'
+```
+
+Security posture: optional bearer/X-API-Key auth (constant-time compare),
+per-client token-bucket rate limiting (default 240 req/min, tunable), strict
+collection-name validation (no path traversal), file ingestion confined to
+`LEANN_INGEST_ROOT`, 64 MiB body cap, CORS allow-list, and every index/LLM
+call wrapped in `spawn_blocking` so slow embedders can never stall the
+runtime. See `examples/rest-demo.sh` for a full walkthrough.
+
 ## Storage format
 
 One file, atomic writes (tmp + rename), mmap-loaded with zero-copy texts:
@@ -287,6 +383,10 @@ x86_64 (AVX-512), quick mode:
 | Two-level search, 10k chunks, warm cache | **91 µs** | reused scratch: −10 µs alloc overhead |
 | Hybrid search (vector + BM25 + RRF), 5k chunks | 274 µs | |
 | SimHash (near-dup check) | 2.8 µs per chunk | |
+| BM25 search, 5k chunks | 362 µs | full corpus scan, top-10 |
+| RRF fusion (2 × 10 ranked lists) | **192 ns** | |
+| Real-repo self-ingest corpus, vector search | 21 µs | 90 chunks of this repo's own source |
+| Real-repo self-ingest corpus, hybrid search | 28 µs | incl. BM25 + fusion |
 | Argon2id key derivation | 17 ms | once per open, by design |
 | ChaCha20-Poly1305 seal/unseal, 64 KiB | 49 µs | |
 
@@ -300,12 +400,13 @@ runs in 10.4 ms (~160 µs/query amortized); scaling follows cores.
 ```sh
 cargo bench -p leann-core   # SIMD kernels, PQ, graph, two-level search,
                             # hot-path (fresh vs reused scratch), batch
-                            # parallelism, dedup + crypto
+                            # parallelism, dedup + crypto, BM25 + fusion,
+                            # real_repo (this repository's own source)
 ```
 
 ## Testing
 
-104 unit + integration tests across the workspace, including:
+131 unit + integration tests across the workspace, including:
 - SIMD kernels agree with portable loops across dims (incl. odd/tail lengths)
 - scratch-reuse search ≡ fresh-scratch search (generation-stamp correctness)
 - compaction: tombstone GC + id remap + save/load roundtrip (regression)
@@ -320,6 +421,17 @@ cargo bench -p leann-core   # SIMD kernels, PQ, graph, two-level search,
 - BM25 ranking, RRF fusion, filters, context expansion
 - guardian block structure, score parsing, sentence attribution,
   grounded rewriting, all four guard policies, repair loops
+- export/import: JSON round-trip, RFC 4180 CSV quoting, Markdown dump
+- QR-video memory: MP4 (ffmpeg) + GIF (pure-Rust) frame roundtrips,
+  multi-frame chunk stitching (CJK/emoji), UTF-8-safe framing regression,
+  deleted-chunk skipping, capacity guards, search-from-video
+- REST API: full lifecycle (create → add → search/hybrid → filter delete →
+  stats → export/import → guard → visual build/search), auth (401 paths,
+  constant-time compare), rate limiting (429), collection-name validation,
+  path-scoped file ingestion (403 outside LEANN_INGEST_ROOT)
+- real-data E2E (`scripts/e2e_self.sh`): the repo ingests its own source
+  (356 chunks), searches it, builds a 356-frame MP4 memory, retrieves text
+  from the video, and drives the REST server over HTTP
 
 ## License
 

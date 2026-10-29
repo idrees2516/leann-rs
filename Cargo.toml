@@ -6,6 +6,8 @@ members = [
     "crates/leann-ingest",
     "crates/leann-chat",
     "crates/leann-guard",
+    "crates/leann-visual",
+    "crates/leann-server",
     "crates/leann-node",
     "crates/leann-cli",
 ]
@@ -25,6 +27,7 @@ rayon = "1.10"
 thiserror = "2"
 rand = "0.8"
 memmap2 = "0.9"
+parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3

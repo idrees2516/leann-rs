@@ -335,6 +335,104 @@ fn bench_dedup_crypto(c: &mut Criterion) {
     group.finish();
 }
 
+
+fn bench_bm25_fusion(c: &mut Criterion) {
+    use leann_core::bm25::Bm25Index;
+    use leann_core::hybrid::{fusion, FusionMode};
+
+    let n = 5000;
+    let texts: Vec<String> = (0..n)
+        .map(|i| {
+            format!(
+                "document {i} about {} with {} details and {} context",
+                ["vector search", "graph pruning", "product quantization"][i % 3],
+                i % 7,
+                i % 11
+            )
+        })
+        .collect();
+    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let bm25 = Bm25Index::build(&refs, leann_core::bm25::Bm25Params::default());
+    let alive = |_: u32| true;
+
+    let mut group = c.benchmark_group("bm25_fusion");
+    group.bench_function("bm25_search_5k", |b| {
+        b.iter(|| bm25.search(black_box("vector quantization details"), 10, &alive))
+    });
+
+    let vr: Vec<(u32, f32)> = (0..10).map(|i| (i, 1.0 - i as f32 * 0.05)).collect();
+    let lr: Vec<(u32, f32)> = (5..15).map(|i| (i, 2.0 - (i - 5) as f32 * 0.1)).collect();
+    group.bench_function("rrf_fusion_10p10", |b| {
+        b.iter(|| fusion(black_box(&vr), black_box(&lr), FusionMode::Rrf, Default::default(), 10))
+    });
+    group.finish();
+}
+
+/// Benchmarks on the *actual repository source*: the corpus leann-rs indexes
+/// when eating its own dog food (see scripts/e2e_self.sh).
+fn bench_real_repo(c: &mut Criterion) {
+    // Collect real repo files (leann-core/benches → repo root).
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["crates/leann-core/src", "crates/leann-visual/src", "crates/leann-server/src"] {
+        let d = root.join(dir);
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                if e.path().extension().map(|x| x == "rs").unwrap_or(false) {
+                    files.push(e.path());
+                }
+            }
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no repo sources found at {}", root.display());
+
+    // Chunk each file at ~4000 bytes (mirrors ingest chunking granularity).
+    let mut chunks: Vec<String> = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        for piece in text.as_bytes().chunks(4000) {
+            chunks.push(String::from_utf8_lossy(piece).into_owned());
+        }
+    }
+    let total_bytes: usize = chunks.iter().map(|c| c.len()).sum();
+    eprintln!(
+        "real_repo corpus: {} files -> {} chunks ({} KiB) from {}",
+        files.len(),
+        chunks.len(),
+        total_bytes / 1024,
+        root.display()
+    );
+
+    let dim = 384;
+    let provider = bench_provider(dim);
+    let cfg = IndexConfig {
+        metric: Metric::Cosine,
+        pq: PqConfig { m: 16, train_iters: 4, ..Default::default() },
+        graph: GraphBuildConfig { m: 12, m0: 24, ef_construction: 64, seed: 1 },
+        hub: HubPruneConfig::default(),
+        search: SearchDefaults::default(),
+        cache_capacity: 8192,
+    };
+    let idx = LeannIndex::build(&chunks, None, provider, cfg).unwrap();
+
+    let mut group = c.benchmark_group("real_repo");
+    group.throughput(Throughput::Elements(chunks.len() as u64));
+    group.sample_size(30);
+    for q in ["hnsw graph pruning", "product quantization adc", "tokenize query bm25"] {
+        group.bench_with_input(BenchmarkId::new("vector_search", q), &q, |b, &q| {
+            b.iter(|| idx.search(q, &SearchOptions::default()).unwrap())
+        });
+        group.bench_with_input(BenchmarkId::new("hybrid_search", q), &q, |b, &q| {
+            b.iter(|| {
+                idx.hybrid_search(q, &leann_core::index::HybridOptions::default())
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
 // black_box: criterion re-exports it
 use criterion::black_box;
 
@@ -346,6 +444,8 @@ criterion_group!(
     bench_two_level,
     bench_index_e2e,
     bench_scratch_and_batch,
-    bench_dedup_crypto
+    bench_dedup_crypto,
+    bench_bm25_fusion,
+    bench_real_repo
 );
 criterion_main!(benches);

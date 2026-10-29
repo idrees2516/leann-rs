@@ -15,5 +15,7 @@ leann-embedder = { path = "../leann-embedder" }
 leann-ingest = { path = "../leann-ingest" }
 leann-chat = { path = "../leann-chat" }
 leann-guard = { path = "../leann-guard" }
+leann-visual = { path = "../leann-visual" }
+leann-server = { path = "../leann-server" }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }

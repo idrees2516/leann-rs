@@ -243,6 +243,10 @@ export declare class Leann {
   /** Add texts with duplicate suppression ("exact" | "near"). */
   addTextsDedup(texts: Array<string>, metadatas?: Array<any>, mode?: string): Promise<AddDedupResultJs>
   stats(): StatsJs
+  /** Export the live corpus as a string ("json" leann-export/v1 | "csv" | "md"). */
+  exportCorpus(format?: string): Promise<string>
+  /** Import a leann-export/v1 JSON document (or bare chunk array); returns chunks added. */
+  importJson(json: string): Promise<number>
   /** IBM Granite Guardian sentence-level grounding audit of any answer */
   verifyAnswer(answer: string, context: Array<string>): Array<VerifiedSentenceJs>
 }

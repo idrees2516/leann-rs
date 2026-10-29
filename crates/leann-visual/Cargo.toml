@@ -1,0 +1,22 @@
+[package]
+name = "leann-visual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QR-code video memory: encode a RAG corpus as a portable video file (memvid-style) with random-access retrieval"
+repository.workspace = true
+keywords = ["memvid", "qr", "video", "rag", "vector-search"]
+categories = ["multimedia::video", "database-implementations"]
+
+[dependencies]
+leann-core = { path = "../leann-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+qrcode = "0.14"
+rqrr = "0.8"
+image = { version = "0.25", default-features = false }
+gif = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

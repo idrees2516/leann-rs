@@ -1,0 +1,28 @@
+[package]
+name = "leann-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Production REST API server for LEANN: multi-collection vector/hybrid search, RAG chat, hallucination guard, QR-video memory, export/import — with auth, rate limiting and a built-in web playground"
+repository.workspace = true
+keywords = ["rag", "vector-search", "api", "server", "rest"]
+categories = ["web-programming::http-server", "database-implementations"]
+
+[dependencies]
+leann-core = { path = "../leann-core" }
+leann-embedder = { path = "../leann-embedder" }
+leann-ingest = { path = "../leann-ingest" }
+leann-chat = { path = "../leann-chat" }
+leann-guard = { path = "../leann-guard" }
+leann-visual = { path = "../leann-visual" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+http-body-util = "0.1"

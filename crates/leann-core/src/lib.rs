@@ -29,6 +29,8 @@ pub mod bm25;
 pub mod cache;
 pub mod context;
 pub mod crypto;
+pub mod dedup;
+pub mod export;
 pub mod filter;
 pub mod format;
 pub mod graph;
@@ -39,7 +41,6 @@ pub mod pq;
 pub mod search;
 pub mod simd;
 pub mod validate;
-pub mod dedup;
 
 pub use batch::{DynamicBatcher, BatcherStats};
 pub use bm25::{Bm25Index, Bm25Params};
@@ -56,6 +57,10 @@ pub use index::{
 pub use metric::Metric;
 pub use simd::{dot, l2_sq, SimdLevel};
 pub use dedup::{DedupMode, Deduper};
+pub use export::{
+    alive_chunks, export_csv, export_json, export_markdown, export_string, import_json,
+    ExportFormat, ImportedChunk,
+};
 pub use validate::{check_filter_limits, safe_component, validate_base_url};
 pub use pq::{PqCodec, PqConfig};
 
